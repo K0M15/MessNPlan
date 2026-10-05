@@ -166,6 +166,15 @@ Doku: `apps/mcp/README.md`, `docs/MCP.md`. Tests: 47 MCP-Tests (Unit + Fetch-Moc
 signierter HTTP-Client), 5 neue Integrationstests für den Verify-Endpunkt; Root-Skripte
 (typcheck/test/build) nehmen das Paket mit.
 
+Feature-Wellen (2026-10-05, je eigener Feature-Branch mit Review + Merge nach `main`):
+- **PWA** (`feature/pwa`): Manifest + Service Worker (API/Socket `NetworkOnly`), Icons, Caddy-Cache-Header; SW-Registrierung in `main.ts` mit `onRegisterError` (blockierte/fehlgeschlagene Registrierung stört die App nicht).
+- **UI** (`feature/gantt-drawer`): Projektansicht volle Breite, Aufgaben als Bottom-Sheet (Desktop 45 vh, mobil Vollbild) mit persistentem Speichern-Button.
+- **Projekt-Löschen** (`feature/project-delete`): Admin und Projekt-Planer, exakte Namensbestätigung (Server prüft den Namen mit).
+- **API-README** (`feature/api-docs`): `docs/API.md` (Auth, Konventionen, alle Endpunkte, curl-Beispiele).
+- **SSH-API** (`feature/ssh-api`): Tabellen `project_api_keys` (Migration 0002), externe POST-Endpunkte unter `/api/v1/external` (Aufgaben inkl. Unteraufgaben, Abhängigkeiten, Zuteilungen), Signatur `keyId\nTimestamp\nMETHOD\noriginalUrl\nsha256(Body)`, Admin-Tab „API-Schlüssel", `docs/API-external.md`.
+- **Ressourcen-Verfügbarkeit** (`feature/resource-availability`): Wochentags-Arbeitszeiten je Ressource + personenbezogene Abwesenheiten (`absences`, Migration 0003), Ressourcen-Kalender für Kapazität/Auslastung/Health/Gantt; der Projektkalender steuert weiterhin die Aufgaben-Terminierung.
+- **Container-DB-Zugriff** auf `DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME` umgestellt (Compose setzt sie), `DATABASE_URL` bleibt Host-Fallback – Passwörter mit Sonderzeichen brauchen so kein URL-Encoding (behebt `ERR_INVALID_URL` beim `migrate`-Service).
+
 ## 11. Nächste Schritte
 
 1. **Outlook gegen echten M365-Tenant**: Azure-App registrieren (Redirect `GRAPH_REDIRECT_URI`, delegated `Calendars.ReadWrite`, `offline_access`, `User.Read`), Verbindung testen; danach Inbound (Delta-Query) und Webhooks ergänzen.
@@ -198,6 +207,8 @@ signierter HTTP-Client), 5 neue Integrationstests für den Verify-Endpunkt; Root
 | 2026-10-05 | MCP-Server als Node-Paket (`@modelcontextprotocol/sdk`), Transporte stdio + Streamable HTTP | Claude Desktop/IDE lokal, remote ohne Extra-Infrastruktur |
 | 2026-10-05 | MCP-HTTP-Schutz per SSH-Signatur; Verifikation über `POST /internal/verify-ssh` | Signaturlogik bleibt genau einmal in der API, kein Drift |
 | 2026-10-05 | `TaskApi`-Interface mit REST-Session- und SSH-Client | Service-Login (lesen/schreiben) und externe API (nur anlegen) austauschbar |
+| 2026-10-05 | Parallel-Features in Git-Worktrees + Feature-Branches mit Subagenten | Keine Dateikonflikte, Review+Merge je Feature |
+| 2026-10-05 | Container-DB über `DB_*`-Variablen statt interpolierter `DATABASE_URL` | Sonderzeichen im Passwort, Compose kann nicht URL-encoden |
 
 ## 13. Bekannte Stolperfallen
 
@@ -217,3 +228,6 @@ signierter HTTP-Client), 5 neue Integrationstests für den Verify-Endpunkt; Root
 - **MCP-SSH-Keys** müssen als **PKCS#8**-PEM vorliegen (`ssh-keygen -p -N "" -m PKCS8 -f key.pem`); OpenSSH-Format liest `node:crypto` nicht.
 - **MCP-HTTP** benötigt `PP_INTERNAL_TOKEN` (oder `JWT_SECRET`) und einen erreichbaren `/internal/verify-ssh`-Endpunkt; ohne gültige SSH-Header antwortet der Endpunkt mit 401. Der Timestamp liegt im ±300-s-Fenster.
 - **MCP-SSH-Modus** kann nur schreiben (externe API ist POST-only); lesende Tools melden einen klaren Fehler – für volle Funktionalität `PP_EMAIL`/`PP_PASSWORD` setzen.
+- **DB-Zugriff**: In Containern gewinnen `DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME` (Compose setzt sie); auf dem Host greift `DATABASE_URL` (dort URL-encodiert). Mindestens eines von beiden muss gesetzt sein (config validiert das).
+- **PWA-Service-Worker**: Bei selbstsignierten Zertifikaten (E2E gegen `https://localhost`) oder blockierten SW fängt `onRegisterError` in `main.ts` den Fehler ab – kein unhandled error, Test bleibt grün.
+- **ESLint ignoriert generierte Artefakte** (`**/playwright-report/**`, `**/test-results/**`); bei neuen Berichtsformaten die Ignore-Liste in `eslint.config.js` mitziehen.

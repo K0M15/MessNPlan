@@ -20,11 +20,18 @@ const boolFromEnv = (defaultValue: boolean) =>
     .optional()
     .transform((v) => (v === undefined || v === '' ? defaultValue : v === 'true' || v === '1'));
 
-const envSchema = z.object({
-  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
-  API_PORT: z.coerce.number().int().positive().default(3000),
+const envSchema = z
+  .object({
+    NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+    API_PORT: z.coerce.number().int().positive().default(3000),
 
-  DATABASE_URL: z.string().min(1, 'DATABASE_URL ist erforderlich'),
+    /** Host-/Dev-Zugriff; im Container werden stattdessen DB_* genutzt. */
+    DATABASE_URL: z.string().min(1).optional(),
+    DB_HOST: z.string().min(1).optional(),
+    DB_PORT: z.coerce.number().int().positive().optional(),
+    DB_USER: z.string().optional(),
+    DB_PASSWORD: z.string().optional(),
+    DB_NAME: z.string().optional(),
 
   APP_ORIGIN: z.string().default('http://localhost:5173'),
   /** Kommaseparierte Liste zusätzlicher erlaubter Origins (z. B. Dev-Ports). */
@@ -47,7 +54,19 @@ const envSchema = z.object({
   DB_CONNECTION_LIMIT: z.coerce.number().int().positive().default(10),
   /** Express "trust proxy": "false", "true", Zahl oder z. B. "loopback". Standard: 1 in Prod, sonst false. */
   TRUST_PROXY: z.string().optional(),
-});
+})
+  .superRefine((value, ctx) => {
+    const hasUrl = Boolean(value.DATABASE_URL);
+    const hasParts = Boolean(value.DB_HOST && value.DB_NAME);
+    if (!hasUrl && !hasParts) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          'Entweder DATABASE_URL (Host/Zugriff) oder DB_HOST + DB_NAME (+ DB_USER/DB_PASSWORD) setzen',
+        path: ['DATABASE_URL'],
+      });
+    }
+  });
 
 export type Config = z.infer<typeof envSchema>;
 

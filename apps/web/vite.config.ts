@@ -12,7 +12,9 @@ export default defineConfig({
     tailwindcss(),
     VitePWA({
       registerType: 'autoUpdate',
-      injectRegister: 'auto',
+      // Registrierung erfolgt explizit in src/main.ts, damit Fehler
+      // (z. B. blockierte SW oder Zertifikatsprobleme) abgefangen werden.
+      injectRegister: null,
       devOptions: { enabled: false },
       includeAssets: ['icons/icon.svg', 'icons/apple-touch-icon.png'],
       manifest: {

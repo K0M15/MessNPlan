@@ -3,7 +3,13 @@ name: projectplaner
 x-api-env: &api-env
   NODE_ENV: production
   API_PORT: "3000"
-  DATABASE_URL: mysql://${MYSQL_USER:-planer}:${MYSQL_PASSWORD}@db:3306/${MYSQL_DATABASE:-projectplaner}
+  # Einzelvariablen statt DATABASE_URL: Sonderzeichen im Passwort brauchen so
+  # kein URL-Encoding (Compose kann nicht encoden).
+  DB_HOST: db
+  DB_PORT: "3306"
+  DB_USER: ${MYSQL_USER:-planer}
+  DB_PASSWORD: ${MYSQL_PASSWORD}
+  DB_NAME: ${MYSQL_DATABASE:-projectplaner}
   APP_ORIGIN: ${APP_ORIGIN:-https://localhost}
   JWT_SECRET: ${JWT_SECRET}
   ACCESS_TOKEN_TTL: ${ACCESS_TOKEN_TTL:-900}

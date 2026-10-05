@@ -37,7 +37,7 @@ process.env.LOG_LEVEL = 'error';
 // oder eine frühere Modul-Evaluierung doch übersteuert, scheitert die Suite
 // hier sofort statt versehentlich gegen die Dev-DB zu laufen.
 const { config } = await import('../../config.js');
-if (config.DATABASE_URL !== databaseUrl) {
-  const masked = config.DATABASE_URL.replace(/:[^:@/]+@/, ':***@');
-  throw new Error(`config.DATABASE_URL zeigt nicht auf den Testcontainer (${masked})`);
+if (config.DB_HOST !== undefined || config.DATABASE_URL !== databaseUrl) {
+  const masked = (config.DATABASE_URL ?? '(nicht gesetzt)').replace(/:[^:@/]+@/, ':***@');
+  throw new Error(`config.DB_* zeigt nicht auf den Testcontainer (${masked})`);
 }
