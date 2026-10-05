@@ -36,7 +36,7 @@ interface AssignmentDto {
 
 type TaskRow = typeof tasks.$inferSelect;
 
-function validateConstraint(type: ConstraintType, date: Date | null | undefined): Date | null {
+export function validateConstraint(type: ConstraintType, date: Date | null | undefined): Date | null {
   if (type !== 'asap' && !date) {
     throw badRequest('Für diesen Constraint-Typ ist ein Datum erforderlich');
   }

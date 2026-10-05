@@ -84,6 +84,28 @@ export const holidayCreateSchema = z.object({
 });
 
 // ---------------------------------------------------------------------------
+// Externe API (SSH-Key-Authentifizierung)
+// ---------------------------------------------------------------------------
+
+export const API_KEY_TYPES = ['ssh-ed25519', 'ssh-rsa'] as const;
+export type ApiKeyType = (typeof API_KEY_TYPES)[number];
+
+export const apiKeyCreateSchema = z.object({
+  name: z.string().min(1).max(120),
+  publicKey: z.string().trim().min(1).max(8_192),
+  expiresAt: z.coerce.date().nullish(),
+});
+
+export const apiKeyUpdateSchema = z
+  .object({
+    name: z.string().min(1).max(120),
+    expiresAt: z.coerce.date().nullish(),
+    isActive: z.boolean(),
+  })
+  .partial()
+  .refine((v) => Object.keys(v).length > 0, 'Mindestens ein Feld angeben');
+
+// ---------------------------------------------------------------------------
 // Aufgaben
 // ---------------------------------------------------------------------------
 
@@ -245,6 +267,8 @@ export type CreateUserInput = z.infer<typeof createUserSchema>;
 export type UpdateUserInput = z.infer<typeof updateUserSchema>;
 export type ProjectCreateInput = z.infer<typeof projectCreateSchema>;
 export type ProjectUpdateInput = z.infer<typeof projectUpdateSchema>;
+export type ApiKeyCreateInput = z.infer<typeof apiKeyCreateSchema>;
+export type ApiKeyUpdateInput = z.infer<typeof apiKeyUpdateSchema>;
 export type TaskCreateInput = z.infer<typeof taskCreateSchema>;
 export type TaskUpdateInput = z.infer<typeof taskUpdateSchema>;
 export type TaskMoveInput = z.infer<typeof taskMoveSchema>;

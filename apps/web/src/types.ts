@@ -57,6 +57,20 @@ export interface TagDto {
   usageCount?: number;
 }
 
+export interface ApiKeyDto {
+  id: number;
+  projectId: number;
+  name: string;
+  keyType: 'ssh-ed25519' | 'ssh-rsa';
+  fingerprint: string;
+  expiresAt: string | null;
+  isActive: boolean;
+  lastUsedAt: string | null;
+  createdBy: number | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface AssignmentDto {
   id: number;
   resourceId: number;

@@ -16,7 +16,7 @@ import { writeAudit } from '../services/audit.js';
 import { loadProjectEdges, wouldCreateCycle } from '../services/dependencyGraph.js';
 import { enqueueJob } from '../services/outbox.js';
 
-async function dependencyDto(ids: number[]) {
+export async function dependencyDto(ids: number[]) {
   if (ids.length === 0) return [] as Array<Record<string, unknown>>;
   const rows = await db
     .select({ id: taskDependencies.id, predecessorId: taskDependencies.predecessorId, successorId: taskDependencies.successorId, type: taskDependencies.type, lagMinutes: taskDependencies.lagMinutes })

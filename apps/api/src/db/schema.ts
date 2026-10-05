@@ -127,6 +127,31 @@ export const projectMembers = mysqlTable(
   ],
 );
 
+export const projectApiKeys = mysqlTable(
+  'project_api_keys',
+  {
+    id: id(),
+    projectId: bigint('project_id', { mode: 'number', unsigned: true })
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    name: varchar('name', { length: 120 }).notNull(),
+    /** OpenSSH-Public-Key in einzeiliger Form ("ssh-ed25519 AAAA… [comment]"). */
+    publicKey: text('public_key').notNull(),
+    keyType: mysqlEnum('key_type', ['ssh-ed25519', 'ssh-rsa']).notNull(),
+    /** SHA256-Fingerprint wie `ssh-keygen -lf`, z. B. "SHA256:AbCd…". */
+    fingerprint: varchar('fingerprint', { length: 160 }).notNull(),
+    expiresAt: datetime('expires_at', { mode: 'date', fsp: 3 }),
+    isActive: boolean('is_active').notNull().default(true),
+    lastUsedAt: datetime('last_used_at', { mode: 'date', fsp: 3 }),
+    createdBy: bigint('created_by', { mode: 'number', unsigned: true }).references(() => users.id, {
+      onDelete: 'set null',
+    }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [index('project_api_keys_project_idx').on(t.projectId)],
+);
+
 // ---------------------------------------------------------------------------
 // Aufgaben
 // ---------------------------------------------------------------------------
@@ -411,6 +436,7 @@ export const schema = {
   projects,
   holidays,
   projectMembers,
+  projectApiKeys,
   tasks,
   taskDependencies,
   resources,
