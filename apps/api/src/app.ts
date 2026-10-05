@@ -11,8 +11,10 @@ import { errorHandler, notFoundHandler } from './http/errorHandler.js';
 import { logger } from './logger.js';
 import { broadcastToProject } from './realtime.js';
 import { metricsHandler, metricsMiddleware } from './services/metrics.js';
+import { apiKeyRoutes } from './routes/apiKeys.js';
 import { assignmentRoutes } from './routes/assignments.js';
 import { authRoutes } from './routes/auth.js';
+import { externalRoutes } from './routes/external.js';
 import { commentRoutes } from './routes/comments.js';
 import { dependencyRoutes } from './routes/dependencies.js';
 import { projectRoutes } from './routes/projects.js';
@@ -50,7 +52,16 @@ export function createApp(): express.Express {
   );
   // Metriken früh einhängen, damit alle Requests erfasst werden (auch 4xx/5xx).
   app.use(metricsMiddleware);
-  app.use(express.json({ limit: '1mb' }));
+  app.use(
+    express.json({
+      limit: '1mb',
+      // Rohen Body nur referenzieren (kein Copy) – die externe SSH-API
+      // signiert sha256(rawBody) und braucht die exakten Bytes.
+      verify: (req, _res, buf) => {
+        (req as express.Request).rawBody = buf;
+      },
+    }),
+  );
   app.use(cookieParser());
   app.use(originCheck);
 
@@ -76,6 +87,10 @@ export function createApp(): express.Express {
   api.use('/auth', authRoutes());
   api.use('/users', userRoutes());
   api.use('/projects', projectRoutes());
+  // Externe API mit eigener SSH-Key-Authentifizierung – vor den internen
+  // Sammlern mounten, die auf '/' liegen und intern `requireAuth` setzen.
+  api.use('/external', externalRoutes());
+  api.use('/', apiKeyRoutes());
   // ACHTUNG Reihenfolge: Die folgenden Router sind auf '/' gemountet und nutzen
   // intern `router.use(requireAuth)` als Gate. Öffentliche Routen (z. B. der
   // Outlook-OAuth-Callback, den Microsoft cross-site aufruft) müssen deshalb

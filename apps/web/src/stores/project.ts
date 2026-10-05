@@ -7,6 +7,7 @@ import { connectSocket } from '@/api/socket';
 import { useToasts } from '@/composables/useToasts';
 import { useAuthStore } from '@/stores/auth';
 import type {
+  ApiKeyDto,
   CommentDto,
   DependencyDto,
   GanttPayloadDto,
@@ -43,6 +44,7 @@ export const useProjectStore = defineStore('project', () => {
   const schedule = ref<GanttPayloadDto | null>(null);
   const health = ref<HealthDto | null>(null);
   const outlook = ref<OutlookConnectionsDto | null>(null);
+  const apiKeys = ref<ApiKeyDto[]>([]);
   const presence = ref<
     Array<{
       userId: number;
@@ -96,6 +98,7 @@ export const useProjectStore = defineStore('project', () => {
       projectId.value = id;
       selectedTaskId.value = null;
       expandedIds.value = new Set();
+      apiKeys.value = [];
     }
     loading.value = true;
     error.value = null;
@@ -255,6 +258,55 @@ export const useProjectStore = defineStore('project', () => {
       return true;
     } catch (err) {
       toasts.error(handleError(err, 'Feiertag konnte nicht gelöscht werden'));
+      return false;
+    }
+  }
+
+  // ---- API-Schlüssel (externer Zugang) ------------------------------------
+
+  async function loadApiKeys(): Promise<void> {
+    if (projectId.value === null) return;
+    const res = await api.get<{ items: ApiKeyDto[] }>(`/projects/${projectId.value}/api-keys`);
+    apiKeys.value = res.items;
+  }
+
+  async function createApiKey(input: {
+    name: string;
+    publicKey: string;
+    expiresAt?: string | null;
+  }): Promise<boolean> {
+    if (projectId.value === null) return false;
+    try {
+      await api.post(`/projects/${projectId.value}/api-keys`, input);
+      await loadApiKeys();
+      return true;
+    } catch (err) {
+      toasts.error(handleError(err, 'API-Schlüssel konnte nicht angelegt werden'));
+      return false;
+    }
+  }
+
+  async function updateApiKey(
+    id: number,
+    patch: { name?: string; expiresAt?: string | null; isActive?: boolean },
+  ): Promise<boolean> {
+    try {
+      await api.patch(`/api-keys/${id}`, patch);
+      await loadApiKeys();
+      return true;
+    } catch (err) {
+      toasts.error(handleError(err, 'API-Schlüssel konnte nicht geändert werden'));
+      return false;
+    }
+  }
+
+  async function deleteApiKey(id: number): Promise<boolean> {
+    try {
+      await api.del(`/api-keys/${id}`);
+      await loadApiKeys();
+      return true;
+    } catch (err) {
+      toasts.error(handleError(err, 'API-Schlüssel konnte nicht gelöscht werden'));
       return false;
     }
   }
@@ -726,6 +778,11 @@ export const useProjectStore = defineStore('project', () => {
     loadHolidays,
     createHoliday,
     deleteHoliday,
+    apiKeys,
+    loadApiKeys,
+    createApiKey,
+    updateApiKey,
+    deleteApiKey,
     setSelection,
     toggleExpanded,
     createTask,

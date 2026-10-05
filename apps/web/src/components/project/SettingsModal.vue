@@ -3,13 +3,14 @@ import { onMounted, reactive, ref } from 'vue';
 import { useProjectStore } from '@/stores/project';
 import { useToasts } from '@/composables/useToasts';
 import { formatCalendarDate } from '@/utils/datetime';
+import ApiKeysTab from './ApiKeysTab.vue';
 
 const emit = defineEmits<{ close: [] }>();
 
 const store = useProjectStore();
 const toasts = useToasts();
 
-const tab = ref<'general' | 'calendar'>('general');
+const tab = ref<'general' | 'calendar' | 'api-keys'>('general');
 const saving = ref(false);
 const addingHoliday = ref(false);
 
@@ -161,6 +162,14 @@ async function removeHoliday(id: number, name: string): Promise<void> {
           >
             Arbeitszeiten &amp; Feiertage
           </button>
+          <button
+            type="button"
+            class="rounded-t-md px-3 py-2 text-sm"
+            :class="tab === 'api-keys' ? 'bg-indigo-50 font-medium text-indigo-700' : 'text-slate-600 hover:bg-slate-50'"
+            @click="tab = 'api-keys'"
+          >
+            API-Schlüssel
+          </button>
         </nav>
 
         <div class="flex-1 space-y-4 overflow-y-auto p-5">
@@ -208,7 +217,7 @@ async function removeHoliday(id: number, name: string): Promise<void> {
             </div>
           </form>
 
-          <div v-else class="space-y-4">
+          <div v-else-if="tab === 'calendar'" class="space-y-4">
             <div>
               <span class="mb-1 block text-xs text-slate-500">Arbeitswoche</span>
               <div class="flex flex-wrap gap-2">
@@ -313,6 +322,8 @@ async function removeHoliday(id: number, name: string): Promise<void> {
               </div>
             </div>
           </div>
+
+          <ApiKeysTab v-else />
         </div>
 
         <footer class="flex justify-end gap-2 border-t border-slate-100 px-5 py-3">
@@ -324,6 +335,7 @@ async function removeHoliday(id: number, name: string): Promise<void> {
             Schließen
           </button>
           <button
+            v-if="tab !== 'api-keys'"
             type="button"
             :disabled="saving"
             class="rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-60"

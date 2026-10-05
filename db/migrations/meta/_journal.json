@@ -15,6 +15,13 @@
       "when": 1791221279007,
       "tag": "0001_wooden_shotgun",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1791228430058,
+      "tag": "0002_perfect_madame_masque",
+      "breakpoints": true
     }
   ]
 }
