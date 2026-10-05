@@ -192,13 +192,9 @@ async function createRootTask(): Promise<void> {
 
       <HealthPanel v-if="showHealth" class="mb-4" />
 
-      <div class="flex items-start gap-4">
-        <div class="min-w-0 flex-1">
-          <GanttChart v-if="view === 'gantt'" :key="store.projectId ?? 0" />
-          <TaskTree v-else />
-        </div>
-        <TaskDrawer />
-      </div>
+      <GanttChart v-if="view === 'gantt'" :key="store.projectId ?? 0" />
+      <TaskTree v-else />
+      <TaskDrawer />
 
       <button
         v-if="store.canWrite"

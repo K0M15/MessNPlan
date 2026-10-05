@@ -1,11 +1,15 @@
 <script setup lang="ts">
 import { computed } from 'vue';
-import { useRouter } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import { useAuthStore } from '@/stores/auth';
 import ToastHost from '@/components/ToastHost.vue';
 
 const auth = useAuthStore();
 const router = useRouter();
+const route = useRoute();
+
+/** Projektansicht (Gantt/Liste) nutzt die volle Breite, alle anderen Routen bleiben begrenzt. */
+const isFullWidth = computed(() => route.name === 'project');
 
 const roleLabel = computed(() => {
   switch (auth.user?.role) {
@@ -58,7 +62,10 @@ async function handleLogout(): Promise<void> {
         </div>
       </div>
     </header>
-    <main class="mx-auto w-full max-w-7xl flex-1 px-4 py-6">
+    <main
+      class="w-full flex-1 px-4 py-6"
+      :class="isFullWidth ? '' : 'mx-auto max-w-7xl'"
+    >
       <RouterView />
     </main>
     <ToastHost />

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { useAuthStore } from '@/stores/auth';
 import { useProjectStore } from '@/stores/project';
 import { useToasts } from '@/composables/useToasts';
@@ -215,12 +215,22 @@ async function removeTask(): Promise<void> {
   await store.deleteTask(task.id);
   toasts.success('Aufgabe gelöscht');
 }
+
+/** ESC schließt das Sheet, ohne die Formularwerte zu speichern. */
+function onKeydown(event: KeyboardEvent): void {
+  if (event.key === 'Escape' && store.selectedTaskId !== null) {
+    store.setSelection(null);
+  }
+}
+
+onMounted(() => window.addEventListener('keydown', onKeydown));
+onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
 </script>
 
 <template>
   <aside
     v-if="store.selectedTask"
-    class="flex w-[420px] shrink-0 flex-col rounded-xl border border-slate-200 bg-white shadow-sm"
+    class="fixed inset-0 z-50 flex h-full flex-col overflow-hidden rounded-none bg-white md:inset-x-4 md:bottom-4 md:top-auto md:z-40 md:h-[45vh] md:rounded-xl md:border md:border-slate-200 md:shadow-xl"
   >
     <header class="flex items-center justify-between gap-2 border-b border-slate-100 px-4 py-3">
       <h2 class="truncate font-medium text-slate-900">{{ store.selectedTask.name }}</h2>
@@ -234,7 +244,7 @@ async function removeTask(): Promise<void> {
       </button>
     </header>
 
-    <nav class="flex gap-1 border-b border-slate-100 px-3 pt-2 text-sm">
+    <nav class="flex gap-1 overflow-x-auto border-b border-slate-100 px-3 pt-2 text-sm">
       <button
         v-for="t in [
           { key: 'details', label: 'Details' },
@@ -244,7 +254,7 @@ async function removeTask(): Promise<void> {
         ] as const"
         :key="t.key"
         type="button"
-        class="rounded-t-md px-3 py-1.5"
+        class="shrink-0 rounded-t-md px-3 py-1.5"
         :class="
           tab === t.key
             ? 'border-b-2 border-indigo-600 font-medium text-indigo-700'
@@ -256,7 +266,7 @@ async function removeTask(): Promise<void> {
       </button>
     </nav>
 
-    <div class="flex-1 overflow-y-auto p-4" style="max-height: calc(100vh - 230px)">
+    <div class="min-h-0 flex-1 overflow-y-auto p-4">
       <!-- Details -->
       <div v-if="tab === 'details'" class="space-y-4">
         <div>
@@ -375,25 +385,6 @@ async function removeTask(): Promise<void> {
               + Tag
             </button>
           </div>
-        </div>
-
-        <div class="flex flex-wrap gap-2">
-          <button
-            v-if="store.canWrite"
-            type="button"
-            class="rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-700"
-            @click="save"
-          >
-            Speichern
-          </button>
-          <button
-            v-if="store.canPlan"
-            type="button"
-            class="ml-auto rounded-md border border-red-200 px-3 py-2 text-sm text-red-600 hover:bg-red-50"
-            @click="removeTask"
-          >
-            Löschen
-          </button>
         </div>
       </div>
 
@@ -523,5 +514,28 @@ async function removeTask(): Promise<void> {
         </div>
       </div>
     </div>
+
+    <!-- Persistenter Fuß: Speichern wirkt auf die Detailfelder, unabhängig vom aktiven Tab. -->
+    <footer class="flex shrink-0 flex-wrap items-center gap-2 border-t border-slate-100 bg-white px-4 py-3">
+      <button
+        v-if="store.canWrite"
+        type="button"
+        class="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
+        @click="save"
+      >
+        Speichern
+      </button>
+      <span v-if="store.canWrite && tab !== 'details'" class="hidden text-xs text-slate-400 md:inline">
+        Speichert die Felder im Tab „Details“
+      </span>
+      <button
+        v-if="store.canPlan"
+        type="button"
+        class="ml-auto rounded-md border border-red-200 px-3 py-2 text-sm text-red-600 hover:bg-red-50"
+        @click="removeTask"
+      >
+        Löschen
+      </button>
+    </footer>
   </aside>
 </template>
