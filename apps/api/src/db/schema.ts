@@ -17,6 +17,7 @@ import {
   type AnyMySqlColumn,
 } from 'drizzle-orm/mysql-core';
 import { sql } from 'drizzle-orm';
+import type { WorkingHours } from '@projectplaner/shared';
 
 const id = () => bigint('id', { mode: 'number', unsigned: true }).autoincrement().primaryKey();
 const createdAt = () =>
@@ -244,7 +245,8 @@ export const resources = mysqlTable(
     type: mysqlEnum('type', ['person', 'machine']).notNull().default('person'),
     email: varchar('email', { length: 255 }),
     capacityMinutesPerDay: int('capacity_minutes_per_day').notNull().default(480),
-    workingHours: json('working_hours').$type<Record<string, unknown>>(),
+    /** Wochentags-Arbeitszeiten (0=So … 6=Sa); null = Projekt-Arbeitszeiten erben. */
+    workingHours: json('working_hours').$type<WorkingHours>(),
     color: varchar('color', { length: 7 }),
     isActive: boolean('is_active').notNull().default(true),
     version: version(),
@@ -252,6 +254,27 @@ export const resources = mysqlTable(
     updatedAt: updatedAt(),
   },
   (t) => [index('resources_project_idx').on(t.projectId)],
+);
+
+export const absences = mysqlTable(
+  'absences',
+  {
+    id: id(),
+    resourceId: bigint('resource_id', { mode: 'number', unsigned: true })
+      .notNull()
+      .references(() => resources.id, { onDelete: 'cascade' }),
+    /** Inklusiver Zeitraum (YYYY-MM-DD in Projekt-Zeitzone). */
+    startDate: date('start_date', { mode: 'string' }).notNull(),
+    endDate: date('end_date', { mode: 'string' }).notNull(),
+    type: mysqlEnum('type', ['vacation', 'sick', 'other']).notNull().default('vacation'),
+    name: varchar('name', { length: 160 }),
+    createdBy: bigint('created_by', { mode: 'number', unsigned: true }).references(() => users.id, {
+      onDelete: 'set null',
+    }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [index('absences_resource_start_idx').on(t.resourceId, t.startDate)],
 );
 
 export const assignments = mysqlTable(
@@ -440,6 +463,7 @@ export const schema = {
   tasks,
   taskDependencies,
   resources,
+  absences,
   assignments,
   tags,
   taskTags,

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import {
+  ABSENCE_TYPES,
   CONSTRAINT_TYPES,
   DEFAULT_CAPACITY_MINUTES_PER_DAY,
   DEFAULT_PAGE_SIZE,
@@ -12,6 +13,7 @@ import {
   RESOURCE_TYPES,
   ROLES,
   TASK_STATUSES,
+  WEEKDAY_KEYS,
 } from './constants.js';
 
 export const idSchema = z.coerce.number().int().positive();
@@ -26,6 +28,12 @@ const colorSchema = z
 
 const emptyToUndefined = <T extends z.ZodType>(schema: T) =>
   z.preprocess((v) => (v === '' || v === null ? undefined : v), schema.optional());
+
+/** "HH:MM[:SS]" → Minuten seit Mitternacht. */
+function timeToMinutes(value: string): number {
+  const [hour = '0', minute = '0'] = value.split(':');
+  return Number(hour) * 60 + Number(minute);
+}
 
 // ---------------------------------------------------------------------------
 // Auth / Benutzer
@@ -182,6 +190,26 @@ export const dependencyUpdateSchema = z
 // Ressourcen / Zuteilungen
 // ---------------------------------------------------------------------------
 
+/**
+ * Wochentags-Arbeitszeiten einer Ressource: `{ "0": { start: "08:00", end: "16:00" } }`
+ * mit 0 = Sonntag … 6 = Samstag. Ein fehlender Wochentag bedeutet „keine Arbeitszeit“.
+ */
+export const workingHoursSchema = z
+  .partialRecord(
+    z.enum(WEEKDAY_KEYS),
+    z.object({
+      start: timeSchema,
+      end: timeSchema,
+    }),
+  )
+  .refine(
+    (value) => Object.values(value).every((w) => timeToMinutes(w.start) < timeToMinutes(w.end)),
+    { message: 'Arbeitszeit: Ende muss nach Start liegen' },
+  );
+
+/** Fehlende Wochentage sind erlaubt (bedeuten „keine Arbeitszeit“). */
+export type WorkingHours = Partial<z.infer<typeof workingHoursSchema>>;
+
 export const resourceCreateSchema = z.object({
   name: z.string().min(1).max(160),
   type: z.enum(RESOURCE_TYPES).default('person'),
@@ -193,12 +221,28 @@ export const resourceCreateSchema = z.object({
     .min(0)
     .max(24 * 60)
     .default(DEFAULT_CAPACITY_MINUTES_PER_DAY),
-  workingHours: z.record(z.string(), z.unknown()).nullish(),
+  workingHours: workingHoursSchema.nullish(),
   color: emptyToUndefined(colorSchema),
   isActive: z.boolean().default(true),
 });
 
 export const resourceUpdateSchema = resourceCreateSchema.partial();
+
+/**
+ * Abwesenheit einer Ressource. `resourceId` kommt aus der Route.
+ * Zeitraum ist inklusiv (startDate … endDate).
+ */
+export const absenceCreateSchema = z
+  .object({
+    startDate: z.coerce.date(),
+    endDate: z.coerce.date(),
+    type: z.enum(ABSENCE_TYPES).default('vacation'),
+    name: z.string().trim().max(160).nullish(),
+  })
+  .refine((value) => value.endDate.getTime() >= value.startDate.getTime(), {
+    message: 'Enddatum darf nicht vor dem Startdatum liegen',
+    path: ['endDate'],
+  });
 
 export const assignmentCreateSchema = z.object({
   resourceId: idSchema,
@@ -281,6 +325,7 @@ export type DependencyCreateInput = z.infer<typeof dependencyCreateSchema>;
 export type DependencyUpdateInput = z.infer<typeof dependencyUpdateSchema>;
 export type ResourceCreateInput = z.infer<typeof resourceCreateSchema>;
 export type ResourceUpdateInput = z.infer<typeof resourceUpdateSchema>;
+export type AbsenceCreateInput = z.infer<typeof absenceCreateSchema>;
 export type AssignmentCreateInput = z.infer<typeof assignmentCreateSchema>;
 export type AssignmentUpdateInput = z.infer<typeof assignmentUpdateSchema>;
 export type TagCreateInput = z.infer<typeof tagCreateSchema>;

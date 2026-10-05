@@ -28,6 +28,20 @@ export type Priority = (typeof PRIORITIES)[number];
 export const RESOURCE_TYPES = ['person', 'machine'] as const;
 export type ResourceType = (typeof RESOURCE_TYPES)[number];
 
+/** Abwesenheitsarten personenbezogener Ressourcen (Urlaub, Krankheit, Sonstiges). */
+export const ABSENCE_TYPES = ['vacation', 'sick', 'other'] as const;
+export type AbsenceType = (typeof ABSENCE_TYPES)[number];
+
+export const ABSENCE_TYPE_LABELS: Record<AbsenceType, string> = {
+  vacation: 'Urlaub',
+  sick: 'Krank',
+  other: 'Sonstiges',
+};
+
+/** Wochentags-Schlüssel (0 = Sonntag … 6 = Samstag) für Ressourcen-Arbeitszeiten. */
+export const WEEKDAY_KEYS = ['0', '1', '2', '3', '4', '5', '6'] as const;
+export type WeekdayKey = (typeof WEEKDAY_KEYS)[number];
+
 export const PROJECT_STATUSES = ['active', 'archived'] as const;
 export type ProjectStatus = (typeof PROJECT_STATUSES)[number];
 
@@ -45,6 +59,7 @@ export const HEALTH_RULES = {
   DEPENDENCY_CYCLE: 'dependency_cycle',
   OVERDUE: 'overdue',
   RESOURCE_OVERALLOCATED: 'resource_overallocated',
+  RESOURCE_ASSIGNED_ON_ABSENCE: 'resource_assigned_on_absence',
   PARENT_CHILD_MISMATCH: 'parent_child_mismatch',
   MILESTONE_WITHOUT_DATE: 'milestone_without_date',
   RESOURCE_WITHOUT_EMAIL: 'resource_without_email',

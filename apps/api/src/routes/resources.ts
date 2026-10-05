@@ -1,12 +1,13 @@
 import { Router } from 'express';
 import { and, eq, inArray, ne, sql } from 'drizzle-orm';
 import {
+  absenceCreateSchema,
   resourceCreateSchema,
   resourceUpdateSchema,
   REALTIME_EVENTS,
 } from '@projectplaner/shared';
 import { db } from '../db/client.js';
-import { assignments, resources, tasks, users } from '../db/schema.js';
+import { absences, assignments, resources, tasks, users } from '../db/schema.js';
 import { conflict, notFound } from '../errors.js';
 import { requireAuth } from '../http/auth.js';
 import { parse, parseId, parseIfMatch } from '../http/parse.js';
@@ -142,6 +143,83 @@ export function resourceRoutes(): Router {
     });
     broadcastToProject(existing.projectId, REALTIME_EVENTS.PROJECT_CHANGED, {
       projectId: existing.projectId,
+    });
+    res.status(204).end();
+  });
+
+  // ---- Abwesenheiten -------------------------------------------------------
+
+  /** `Date` (UTC-Mitternacht aus Zod-Coerce) → `YYYY-MM-DD` für die date-Spalte. */
+  const toDateString = (value: Date): string => value.toISOString().slice(0, 10);
+
+  router.get('/resources/:id/absences', async (req, res) => {
+    const id = parseId(req.params.id);
+    const [existing] = await db.select().from(resources).where(eq(resources.id, id)).limit(1);
+    if (!existing) throw notFound('Ressource nicht gefunden');
+    await ensureProjectAccess(existing.projectId, req.user!);
+
+    const items = await db
+      .select()
+      .from(absences)
+      .where(eq(absences.resourceId, id))
+      .orderBy(absences.startDate);
+    res.json({ items });
+  });
+
+  router.post('/resources/:id/absences', async (req, res) => {
+    const id = parseId(req.params.id);
+    const [existing] = await db.select().from(resources).where(eq(resources.id, id)).limit(1);
+    if (!existing) throw notFound('Ressource nicht gefunden');
+    await ensureProjectAccess(existing.projectId, req.user!, 'planner');
+    const input = parse(absenceCreateSchema, req.body);
+
+    const [created] = await db
+      .insert(absences)
+      .values({
+        resourceId: id,
+        startDate: toDateString(input.startDate),
+        endDate: toDateString(input.endDate),
+        type: input.type,
+        name: input.name?.trim() || null,
+        createdBy: req.user!.id,
+      })
+      .$returningId();
+
+    await writeAudit({
+      userId: req.user!.id,
+      entityType: 'absence',
+      entityId: created!.id,
+      action: 'create',
+    });
+    broadcastToProject(existing.projectId, REALTIME_EVENTS.PROJECT_CHANGED, {
+      projectId: existing.projectId,
+    });
+
+    const [absence] = await db.select().from(absences).where(eq(absences.id, created!.id)).limit(1);
+    res.status(201).json({ absence });
+  });
+
+  router.delete('/absences/:id', async (req, res) => {
+    const id = parseId(req.params.id);
+    const [existing] = await db.select().from(absences).where(eq(absences.id, id)).limit(1);
+    if (!existing) throw notFound('Abwesenheit nicht gefunden');
+    const [resource] = await db
+      .select({ projectId: resources.projectId })
+      .from(resources)
+      .where(eq(resources.id, existing.resourceId))
+      .limit(1);
+    if (!resource) throw notFound('Ressource nicht gefunden');
+    await ensureProjectAccess(resource.projectId, req.user!, 'planner');
+
+    await db.delete(absences).where(eq(absences.id, id));
+    await writeAudit({
+      userId: req.user!.id,
+      entityType: 'absence',
+      entityId: id,
+      action: 'delete',
+    });
+    broadcastToProject(resource.projectId, REALTIME_EVENTS.PROJECT_CHANGED, {
+      projectId: resource.projectId,
     });
     res.status(204).end();
   });

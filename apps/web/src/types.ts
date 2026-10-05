@@ -1,6 +1,13 @@
-import type { HealthSeverity, ProjectRole, Role, DependencyType } from '@projectplaner/shared';
+import type {
+  AbsenceType,
+  HealthSeverity,
+  ProjectRole,
+  Role,
+  DependencyType,
+  WorkingHours,
+} from '@projectplaner/shared';
 
-export type { HealthSeverity, ProjectRole, Role, DependencyType };
+export type { AbsenceType, HealthSeverity, ProjectRole, Role, DependencyType, WorkingHours };
 
 export interface UserDto {
   id: number;
@@ -135,10 +142,34 @@ export interface ResourceDto {
   type: 'person' | 'machine';
   email: string | null;
   capacityMinutesPerDay: number;
+  /** Wochentags-Arbeitszeiten (0=So … 6=Sa); null = Projektzeiten erben. */
+  workingHours: WorkingHours | null;
   color: string | null;
   isActive: boolean;
   version: number;
   openAssignmentCount?: number;
+}
+
+export interface AbsenceDto {
+  id: number;
+  resourceId: number;
+  startDate: string;
+  endDate: string;
+  type: AbsenceType;
+  name: string | null;
+  createdBy: number | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Abwesenheit im Gantt-Payload (ohne Audit-Felder). */
+export interface GanttAbsenceDto {
+  id: number;
+  resourceId: number;
+  startDate: string;
+  endDate: string;
+  type: AbsenceType;
+  name: string | null;
 }
 
 export interface ScheduleTaskDto {
@@ -212,6 +243,7 @@ export interface UtilizationDto {
 
 export interface GanttPayloadDto extends SchedulePayloadDto {
   utilization: UtilizationDto;
+  absences: GanttAbsenceDto[];
 }
 
 export interface HealthIssueDto {
