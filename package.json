@@ -12,13 +12,13 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "npm run build -w @projectplaner/shared && npm run build -w @projectplaner/api && npm run build -w @projectplaner/web",
+    "build": "npm run build -w @projectplaner/shared && npm run build -w @projectplaner/api && npm run build -w @projectplaner/mcp && npm run build -w @projectplaner/web",
     "build:shared": "npm run build -w @projectplaner/shared",
     "dev": "npm run build:shared && concurrently -k -n shared,api,worker,web -c gray,blue,magenta,green \"npm run dev -w @projectplaner/shared\" \"npm run dev -w @projectplaner/api\" \"npm run worker -w @projectplaner/api\" \"npm run dev -w @projectplaner/web\"",
     "dev:api": "npm run build:shared && npm run dev -w @projectplaner/api",
     "dev:web": "npm run build:shared && npm run dev -w @projectplaner/web",
-    "typecheck": "npm run build:shared && npm run typecheck -w @projectplaner/api && npm run typecheck -w @projectplaner/web",
-    "test": "npm run build:shared && npm run test -w @projectplaner/api && npm run test -w @projectplaner/web",
+    "typecheck": "npm run build:shared && npm run typecheck -w @projectplaner/api && npm run typecheck -w @projectplaner/mcp && npm run typecheck -w @projectplaner/web",
+    "test": "npm run build:shared && npm run test -w @projectplaner/api && npm run test -w @projectplaner/mcp && npm run test -w @projectplaner/web",
     "test:integration": "npm run build:shared && npm run test:integration -w @projectplaner/api",
     "test:e2e": "npm run test:e2e -w @projectplaner/e2e",
     "lint": "eslint .",

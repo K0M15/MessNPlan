@@ -59,6 +59,7 @@ docker compose up -d --build
 | `npm test` | Unit-Tests (Vitest) |
 | `npm run test:integration` | API-Integrationstests (Testcontainers-MySQL, ~20 s) |
 | `npm run test:e2e` | Playwright-E2E (laufende App unter `E2E_BASE_URL` nötig) |
+| `npm test -w @projectplaner/mcp` | MCP-Unit-/Transporttests (stdio-Smoke, signierter HTTP-Client) |
 | `npm run lint` | ESLint über das Repo |
 | `npm run db:generate` | Drizzle-Migration aus Schema generieren (nach Schemaänderung!) |
 | `npm run db:migrate` | Migrationen anwenden |
@@ -83,6 +84,10 @@ Siehe `.env.example` (vollständig kommentiert). Pflicht in Prod: `MYSQL_PASSWOR
 Für Outlook-Sync zusätzlich: `APP_ENCRYPTION_KEY` (32 Byte base64) sowie `GRAPH_CLIENT_ID`,
 `GRAPH_TENANT_ID`, ggf. `GRAPH_CLIENT_SECRET`, `GRAPH_REDIRECT_URI`.
 
+MCP-Server (`apps/mcp`, eigener Prozess): `PP_API_URL`, `PP_EMAIL`/`PP_PASSWORD`
+(Service-Login) oder `PP_KEY_ID`/`PP_PRIVATE_KEY_PATH` (SSH-signiert, PKCS#8),
+im HTTP-Betrieb zusätzlich `PP_INTERNAL_URL`/`PP_INTERNAL_TOKEN` – siehe `docs/MCP.md`.
+
 ## 7. Domänenregeln
 
 - **Dauern immer in Minuten** (`estimated_minutes`), Anzeige konvertiert.
@@ -96,7 +101,7 @@ Für Outlook-Sync zusätzlich: `APP_ENCRYPTION_KEY` (32 Byte base64) sowie `GRAP
 
 ## 8. Architektur & Konventionen
 
-- Monorepo (npm workspaces): `apps/api`, `apps/web`, `packages/shared` (Zod-Schemas + Typen).
+- Monorepo (npm workspaces): `apps/api`, `apps/web`, `apps/mcp` (MCP-Server, stdio + SSH-signiertes Streamable HTTP), `packages/shared` (Zod-Schemas + Typen).
 - API-Routen unter `/api/v1`; Fehler als RFC 7807 (`application/problem+json`).
 - Validierung immer per Zod-Schema aus `@projectplaner/shared`.
 - Optimistic Locking: Entitäten mit `version`-Spalte; UI sendet `If-Match` (Version) → bei Konflikt `409`.
@@ -150,12 +155,24 @@ Wellen 1+2 (2026-10-05), mit Subagenten umgesetzt und reviewt:
 - **Kalender-Materialisierung**: Tages-Cache + ms-Arithmetik statt Luxon pro Slot; `GET /gantt` bei 2.000 Tasks von **9,6 s → 0,11–0,33 s**, `POST /schedule` 1,2 s → 0,48 s (kein Eventloop-Block mehr)
 - Bugfixes aus den Tests: `resources`/`tags`-Query (ambigous id → 500 auf Projektseite), `TaskDrawer` Schätzung (`.trim()` auf number), `GET /tasks/:id/dependencies` vertauschte Richtungen, Login-Rate-Limit in Development auf 100
 
+MCP-Server (2026-10-05, Branch `feature/mcp`): neues Workspace-Paket `apps/mcp` (`@projectplaner/mcp`)
+mit 9 Tools (`list_projects`, `get_project`, `list_tasks`, `create_task`, `add_dependency`,
+`assign_resource`, `compute_schedule`, `get_health`, `get_gantt_summary`), stdio- und
+Streamable-HTTP-Transport (`--http --port 3900`). Zugriff über `TaskApi`-Interface: REST-Session
+(Service-Login, Cookie-Handling + 401-Refresh) oder SSH-signierte externe API (Ed25519/RSA,
+PKCS#8). HTTP-Endpunkt nur mit gültiger SSH-Signatur; Verifikation über neuen internen Endpunkt
+`POST /internal/verify-ssh` (Token = `JWT_SECRET`, nutzt extrahiertes `authenticateSshRequest`).
+Doku: `apps/mcp/README.md`, `docs/MCP.md`. Tests: 47 MCP-Tests (Unit + Fetch-Mock + stdio-Smoke +
+signierter HTTP-Client), 5 neue Integrationstests für den Verify-Endpunkt; Root-Skripte
+(typcheck/test/build) nehmen das Paket mit.
+
 ## 11. Nächste Schritte
 
 1. **Outlook gegen echten M365-Tenant**: Azure-App registrieren (Redirect `GRAPH_REDIRECT_URI`, delegated `Calendars.ReadWrite`, `offline_access`, `User.Read`), Verbindung testen; danach Inbound (Delta-Query) und Webhooks ergänzen.
 2. **Restore-Drill** monatlich nach `docs/operations/backup-restore.md` wiederholen (Erstlauf 2026-10-05: 1 Projekt/12 Tasks/9 Abhängigkeiten erfolgreich wiederhergestellt).
 3. Optional: Trivy von Report- auf Blockiermodus stellen, Grafana/Prometheus-Profil ergänzen, `/metrics` per Caddy blocken (bereits nicht exponiert).
 4. Release-Tag + Abnahme (M8): Demo-Projekt prüfen, Runbooks verlinken, Version setzen.
+5. **MCP-Produktivbetrieb**: Compose-Service/Caddy-Route für `apps/mcp --http` festlegen, dediziertes Service-Konto (minimale Rolle) + API-Schlüssel mit `expiresAt` anlegen, Reverse Proxy mit TLS und restriktiver Bind-Adresse dokumentieren; optional Rate-Limit am MCP-Endpunkt ergänzen.
 
 ## 12. Entscheidungen (ADR-Kurzlog)
 
@@ -178,6 +195,9 @@ Wellen 1+2 (2026-10-05), mit Subagenten umgesetzt und reviewt:
 | 2026-10-05 | Kalender-Tage werden für heiße Pfade materialisiert (Binärsuche statt Luxon pro Slot) | `GET /gantt` 9,6 s → 0,3 s bei 2.000 Tasks, kein Eventloop-Block |
 | 2026-10-05 | Testpyramide in CI: Unit + Integration (Testcontainers) + E2E (Playwright) + Trivy | Regressionen früh erkennen, Prod-Images prüfen |
 | 2026-10-05 | Login-Rate-Limit in Development 100, in Produktion 20 | E2E-Serienläufe ohne Fehlalarme |
+| 2026-10-05 | MCP-Server als Node-Paket (`@modelcontextprotocol/sdk`), Transporte stdio + Streamable HTTP | Claude Desktop/IDE lokal, remote ohne Extra-Infrastruktur |
+| 2026-10-05 | MCP-HTTP-Schutz per SSH-Signatur; Verifikation über `POST /internal/verify-ssh` | Signaturlogik bleibt genau einmal in der API, kein Drift |
+| 2026-10-05 | `TaskApi`-Interface mit REST-Session- und SSH-Client | Service-Login (lesen/schreiben) und externe API (nur anlegen) austauschbar |
 
 ## 13. Bekannte Stolperfallen
 
@@ -193,3 +213,7 @@ Wellen 1+2 (2026-10-05), mit Subagenten umgesetzt und reviewt:
 - **Login-Rate-Limit**: 20/15 min pro IP in Produktion, 100 in Development (E2E). Bei 429 im Dev: kurz warten oder API neu starten.
 - **Socket.IO nach Token-Ablauf**: Der Client reconnectet nach einem erfolgreichen Refresh automatisch (`pp:auth-refreshed`).
 - **Öffentliche API-Routen müssen in `app.ts` VOR den `/`-gemounteten Sammlern stehen** (`outlookRoutes` vor `taskRoutes` & Co.): Diese Sammel-Router setzen intern `router.use(requireAuth)` und fangen sonst jeden `/api/v1/*`-Request ab. Betroffen ist besonders der Outlook-OAuth-Callback – Microsoft leitet cross-site zurück, dabei werden `SameSite=Strict`-Cookies (Access-Token) nicht gesendet. Gates in Routen mit gemischten Pfaden auf ihre Präfixe beschränken (`router.use(['/integrations/outlook', '/projects/:projectId/outlook'], requireAuth)`). Regressionstest: `apps/api/src/__tests__/integration/outlook.integration.test.ts`.
+- **MCP-stdio**: stdout ist ausschließlich für das MCP-Protokoll reserviert – Logs gehören nach stderr (`console.error`), sonst zerreißt der JSON-RPC-Stream.
+- **MCP-SSH-Keys** müssen als **PKCS#8**-PEM vorliegen (`ssh-keygen -p -N "" -m PKCS8 -f key.pem`); OpenSSH-Format liest `node:crypto` nicht.
+- **MCP-HTTP** benötigt `PP_INTERNAL_TOKEN` (oder `JWT_SECRET`) und einen erreichbaren `/internal/verify-ssh`-Endpunkt; ohne gültige SSH-Header antwortet der Endpunkt mit 401. Der Timestamp liegt im ±300-s-Fenster.
+- **MCP-SSH-Modus** kann nur schreiben (externe API ist POST-only); lesende Tools melden einen klaren Fehler – für volle Funktionalität `PP_EMAIL`/`PP_PASSWORD` setzen.

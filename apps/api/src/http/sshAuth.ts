@@ -238,6 +238,84 @@ function singleHeader(value: string | string[] | undefined): string | undefined 
   return (Array.isArray(value) ? value[0] : value)?.trim();
 }
 
+export interface SshAuthInput {
+  /** Werte exakt aus den Headern (nach Trim); fehlend = `undefined`. */
+  keyId?: string | undefined;
+  timestamp?: string | undefined;
+  signature?: string | undefined;
+  method: string;
+  /** Pfad inkl. Query, wie ihn der Server für die Signatur sieht. */
+  url: string;
+  rawBody: Buffer;
+}
+
+/**
+ * Prüft die SSH-Signatur eines Requests und liefert den Schlüsselkontext.
+ * Wird sowohl von der externen API (`sshAuth`-Middleware) als auch vom
+ * internen Verify-Endpunkt (`POST /internal/verify-ssh`) genutzt, damit die
+ * Prüflogik exakt einmal existiert.
+ */
+export async function authenticateSshRequest(input: SshAuthInput): Promise<ApiKeyContext> {
+  const keyIdRaw = input.keyId;
+  const timestampRaw = input.timestamp;
+  const signatureRaw = input.signature;
+
+  if (!keyIdRaw || !timestampRaw || !signatureRaw) {
+    throw unauthorized('SSH-Header fehlen (x-pp-key-id, x-pp-timestamp, x-pp-signature)');
+  }
+  if (!/^\d+$/.test(keyIdRaw) || Number(keyIdRaw) <= 0) {
+    throw unauthorized('Ungültige Key-ID');
+  }
+  if (!/^\d+$/.test(timestampRaw)) {
+    throw unauthorized('Ungültiger Timestamp (Unix-Sekunden erwartet)');
+  }
+  if (!isTimestampWithinTolerance(Number(timestampRaw))) {
+    throw unauthorized(
+      `Timestamp außerhalb des erlaubten Fensters (±${SSH_TIMESTAMP_TOLERANCE_SECONDS} s)`,
+    );
+  }
+
+  const [key] = await db
+    .select()
+    .from(projectApiKeys)
+    .where(eq(projectApiKeys.id, Number(keyIdRaw)))
+    .limit(1);
+  if (!key) throw unauthorized('API-Schlüssel nicht gefunden');
+  const invalidReason = apiKeyInvalidReason(key);
+  if (invalidReason === 'inactive') throw unauthorized('API-Schlüssel ist deaktiviert');
+  if (invalidReason === 'expired') throw unauthorized('API-Schlüssel ist abgelaufen');
+
+  let parsedKey: ParsedSshPublicKey;
+  try {
+    parsedKey = parseOpenSshPublicKey(key.publicKey);
+  } catch {
+    throw unauthorized('Hinterlegter API-Schlüssel ist ungültig');
+  }
+
+  const signature = Buffer.from(signatureRaw, 'base64');
+  if (signature.length === 0) {
+    throw unauthorized('Signatur ist kein gültiges Base64');
+  }
+
+  const canonical = buildCanonicalString({
+    keyId: keyIdRaw,
+    timestamp: timestampRaw,
+    method: input.method,
+    url: input.url,
+    bodyHashHex: sha256Hex(input.rawBody),
+  });
+  if (!verifySshSignature(parsedKey, Buffer.from(canonical, 'utf8'), signature)) {
+    throw unauthorized('Signatur ungültig');
+  }
+
+  const context: ApiKeyContext = { id: key.id, projectId: key.projectId, name: key.name };
+  await db
+    .update(projectApiKeys)
+    .set({ lastUsedAt: new Date() })
+    .where(eq(projectApiKeys.id, key.id));
+  return context;
+}
+
 /**
  * Authentifiziert Requests externer Clients per SSH-Public-Key.
  * Erwartet `x-pp-key-id`, `x-pp-timestamp` (Unix-Sekunden) und
@@ -245,65 +323,14 @@ function singleHeader(value: string | string[] | undefined): string | undefined 
  */
 export async function sshAuth(req: Request, _res: Response, next: NextFunction): Promise<void> {
   try {
-    const keyIdRaw = singleHeader(req.headers[SSH_HEADERS.KEY_ID]);
-    const timestampRaw = singleHeader(req.headers[SSH_HEADERS.TIMESTAMP]);
-    const signatureRaw = singleHeader(req.headers[SSH_HEADERS.SIGNATURE]);
-
-    if (!keyIdRaw || !timestampRaw || !signatureRaw) {
-      throw unauthorized(
-        'SSH-Header fehlen (x-pp-key-id, x-pp-timestamp, x-pp-signature)',
-      );
-    }
-    if (!/^\d+$/.test(keyIdRaw) || Number(keyIdRaw) <= 0) {
-      throw unauthorized('Ungültige Key-ID');
-    }
-    if (!/^\d+$/.test(timestampRaw)) {
-      throw unauthorized('Ungültiger Timestamp (Unix-Sekunden erwartet)');
-    }
-    if (!isTimestampWithinTolerance(Number(timestampRaw))) {
-      throw unauthorized(
-        `Timestamp außerhalb des erlaubten Fensters (±${SSH_TIMESTAMP_TOLERANCE_SECONDS} s)`,
-      );
-    }
-
-    const [key] = await db
-      .select()
-      .from(projectApiKeys)
-      .where(eq(projectApiKeys.id, Number(keyIdRaw)))
-      .limit(1);
-    if (!key) throw unauthorized('API-Schlüssel nicht gefunden');
-    const invalidReason = apiKeyInvalidReason(key);
-    if (invalidReason === 'inactive') throw unauthorized('API-Schlüssel ist deaktiviert');
-    if (invalidReason === 'expired') throw unauthorized('API-Schlüssel ist abgelaufen');
-
-    let parsedKey: ParsedSshPublicKey;
-    try {
-      parsedKey = parseOpenSshPublicKey(key.publicKey);
-    } catch {
-      throw unauthorized('Hinterlegter API-Schlüssel ist ungültig');
-    }
-
-    const signature = Buffer.from(signatureRaw, 'base64');
-    if (signature.length === 0) {
-      throw unauthorized('Signatur ist kein gültiges Base64');
-    }
-
-    const canonical = buildCanonicalString({
-      keyId: keyIdRaw,
-      timestamp: timestampRaw,
+    req.apiKey = await authenticateSshRequest({
+      keyId: singleHeader(req.headers[SSH_HEADERS.KEY_ID]),
+      timestamp: singleHeader(req.headers[SSH_HEADERS.TIMESTAMP]),
+      signature: singleHeader(req.headers[SSH_HEADERS.SIGNATURE]),
       method: req.method,
       url: req.originalUrl,
-      bodyHashHex: sha256Hex(req.rawBody ?? Buffer.alloc(0)),
+      rawBody: req.rawBody ?? Buffer.alloc(0),
     });
-    if (!verifySshSignature(parsedKey, Buffer.from(canonical, 'utf8'), signature)) {
-      throw unauthorized('Signatur ungültig');
-    }
-
-    req.apiKey = { id: key.id, projectId: key.projectId, name: key.name };
-    await db
-      .update(projectApiKeys)
-      .set({ lastUsedAt: new Date() })
-      .where(eq(projectApiKeys.id, key.id));
     next();
   } catch (err) {
     next(err);

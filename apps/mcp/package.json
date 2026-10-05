@@ -1,0 +1,31 @@
+{
+  "name": "@projectplaner/mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "MCP-Server für ProjectPlaner (stdio + SSH-geschützter Streamable HTTP)",
+  "main": "dist/index.js",
+  "bin": {
+    "projectplaner-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "@projectplaner/shared": "*",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.15",
+    "vitest": "^5.0.3"
+  }
+}
