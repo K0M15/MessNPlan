@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  quality:
+    name: Lint, Types, Tests, Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  integration:
+    name: Integrationstests (Testcontainers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Integrationstests (eigener MySQL-Container)
+        env:
+          TESTCONTAINERS_RYUK_DISABLED: "true"
+        run: npm run test:integration
+
+  docker:
+    name: Docker-Images & Smoke-Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cp .env.example .env
+      - run: docker compose config --quiet
+      - run: docker compose build
+      - name: DB, Migration und API starten
+        run: |
+          docker compose up -d db
+          docker compose run --rm migrate
+          docker compose up -d api
+          for i in $(seq 1 30); do
+            if docker compose exec -T api wget -qO- http://127.0.0.1:3000/healthz | grep -q '"status":"ok"'; then
+              echo "API healthy"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "API wurde nicht healthy" >&2
+          docker compose logs api >&2
+          exit 1
+      - name: Trivy – API-Image scannen
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: projectplaner-api:latest
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          # Report-Modus: Findings erscheinen im Log, blockieren den Build (noch) nicht.
+          exit-code: '0'
+      - name: Trivy – Web-Image scannen
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: projectplaner-web:latest
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '0'
+      - name: Aufräumen
+        if: always()
+        run: docker compose down -v
+
+  e2e:
+    name: E2E (Playwright)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: cp .env.example .env
+      - name: Docker-Images bauen
+        run: docker compose build
+      - name: DB starten, migrieren und Seed anlegen
+        run: |
+          docker compose up -d db
+          docker compose run --rm migrate
+          docker compose run --rm -e SEED_DEMO=true migrate node apps/api/dist/db/seed.js
+      - name: API, Worker und Web starten
+        env:
+          # .env.example ist auf Dev ausgelegt; für den Prod-Stack überschreiben.
+          APP_ORIGIN: https://localhost
+          COOKIE_SECURE: "true"
+        run: docker compose up -d api worker web
+      - name: Auf die App warten
+        run: |
+          for i in $(seq 1 60); do
+            if curl -kfsS https://localhost/healthz | grep -q '^ok$'; then
+              echo "App erreichbar"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "App wurde nicht erreichbar" >&2
+          docker compose logs api web >&2
+          exit 1
+      - run: npx playwright install --with-deps chromium
+      - name: E2E-Tests
+        env:
+          E2E_BASE_URL: https://localhost
+        run: npm run test:e2e -w @projectplaner/e2e
+      - name: Playwright-Report hochladen
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            tests/e2e/playwright-report/
+            tests/e2e/test-results/
+          retention-days: 7
+      - name: Aufräumen
+        if: always()
+        run: docker compose down -v

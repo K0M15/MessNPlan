@@ -1,0 +1,160 @@
+name: projectplaner
+
+x-api-env: &api-env
+  NODE_ENV: production
+  API_PORT: "3000"
+  DATABASE_URL: mysql://${MYSQL_USER:-planer}:${MYSQL_PASSWORD}@db:3306/${MYSQL_DATABASE:-projectplaner}
+  APP_ORIGIN: ${APP_ORIGIN:-https://localhost}
+  JWT_SECRET: ${JWT_SECRET}
+  ACCESS_TOKEN_TTL: ${ACCESS_TOKEN_TTL:-900}
+  REFRESH_TOKEN_TTL_DAYS: ${REFRESH_TOKEN_TTL_DAYS:-30}
+  COOKIE_SECURE: ${COOKIE_SECURE:-true}
+  APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY:-}
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  GRAPH_CLIENT_ID: ${GRAPH_CLIENT_ID:-}
+  GRAPH_TENANT_ID: ${GRAPH_TENANT_ID:-common}
+  GRAPH_CLIENT_SECRET: ${GRAPH_CLIENT_SECRET:-}
+  GRAPH_REDIRECT_URI: ${GRAPH_REDIRECT_URI:-}
+  DB_CONNECTION_LIMIT: ${DB_CONNECTION_LIMIT:-10}
+  API_INTERNAL_URL: http://api:3000
+
+x-api-image: &api-image
+  build:
+    context: .
+    dockerfile: apps/api/Dockerfile
+    target: runtime
+
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
+
+services:
+  db:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-projectplaner}
+      MYSQL_USER: ${MYSQL_USER:-planer}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      TZ: UTC
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --default-time-zone=+00:00
+    volumes:
+      - dbdata:/var/lib/mysql
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    networks: [backend]
+    <<: *logging
+
+  migrate:
+    <<: [*api-image, *logging]
+    command: ["node", "apps/api/dist/db/migrate.js"]
+    environment: *api-env
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [backend]
+    restart: "no"
+
+  api:
+    <<: [*api-image, *logging]
+    command: ["node", "apps/api/dist/index.js"]
+    environment: *api-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks: [backend, edge]
+    restart: unless-stopped
+
+  worker:
+    <<: [*api-image, *logging]
+    command: ["node", "apps/api/dist/worker.js"]
+    environment: *api-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks: [backend]
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      target: runtime
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - caddydata:/data
+      - caddyconfig:/config
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:80/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks: [edge]
+    restart: unless-stopped
+    <<: *logging
+
+  backup:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-projectplaner}
+      MYSQL_USER: ${MYSQL_USER:-planer}
+      MYSQL_PWD: ${MYSQL_PASSWORD}
+    volumes:
+      - ./backups:/backups
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          ts=$$(date -u +%Y%m%d-%H%M%S)
+          echo "[backup] dump $$MYSQL_DATABASE at $$ts"
+          mysqldump -h db -u "$$MYSQL_USER" --single-transaction --routines --triggers "$$MYSQL_DATABASE" | gzip > "/backups/$${MYSQL_DATABASE}-$${ts}.sql.gz"
+          find /backups -name '*.sql.gz' -mtime +14 -delete
+          sleep 86400
+        done
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [backend]
+    <<: *logging
+
+volumes:
+  dbdata:
+  caddydata:
+  caddyconfig:
+
+networks:
+  backend:
+    internal: true
+  edge:
