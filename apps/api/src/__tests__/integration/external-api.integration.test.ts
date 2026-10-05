@@ -3,6 +3,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
+import { config } from '../../config.js';
 import { closeDatabase } from '../../db/client.js';
 import { buildCanonicalString } from '../../http/sshAuth.js';
 import { createUser, loginAgent } from './helpers.js';
@@ -10,6 +11,7 @@ import { createUser, loginAgent } from './helpers.js';
 /**
  * Externe SSH-API: Key-Verwaltung per Admin-API, signierte Requests,
  * Replay-/Ablauf-/Signaturfehler, Zyklusprüfung und Zuteilungen.
+ * Zusätzlich: interner Verify-Endpunkt für den MCP-Server.
  */
 const app = createApp();
 const admin = await createUser({ role: 'admin' });
@@ -310,5 +312,99 @@ describe('Externe Abhängigkeiten und Zuteilungen', () => {
       keyId: apiKey.id,
       privateKey: key.privateKey,
     }).expect(409);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Interner Verify-Endpunkt (MCP-Server)
+// ---------------------------------------------------------------------------
+
+describe('Interner Verify-Endpunkt (/internal/verify-ssh)', () => {
+  const internalToken = config.JWT_SECRET;
+
+  function signVerifyBody(
+    keyId: number,
+    timestamp: number,
+    method: string,
+    url: string,
+    body: string,
+  ): string {
+    const canonical = buildCanonicalString({
+      keyId,
+      timestamp,
+      method,
+      url,
+      bodyHashHex: createHash('sha256').update(body).digest('hex'),
+    });
+    return cryptoSign(null, Buffer.from(canonical, 'utf8'), key.privateKey).toString('base64');
+  }
+
+  function verifyRequest(payload: Record<string, unknown>) {
+    return request(app).post('/internal/verify-ssh').set('x-internal-token', internalToken).send(payload);
+  }
+
+  it('bestätigt eine gültige Signatur mit Projekt und Schlüsselname', async () => {
+    const body = '{"jsonrpc":"2.0","id":1,"method":"initialize"}';
+    const timestamp = Math.floor(Date.now() / 1000);
+    const res = await verifyRequest({
+      keyId: String(apiKey.id),
+      timestamp: String(timestamp),
+      signature: signVerifyBody(apiKey.id, timestamp, 'POST', '/mcp', body),
+      method: 'POST',
+      url: '/mcp',
+      rawBody: Buffer.from(body).toString('base64'),
+    }).expect(200);
+
+    expect(res.body).toEqual({
+      valid: true,
+      projectId,
+      keyName: 'Testschlüssel',
+    });
+  });
+
+  it('lehnt eine falsche Signatur mit 401 ab', async () => {
+    const timestamp = Math.floor(Date.now() / 1000);
+    const res = await verifyRequest({
+      keyId: String(apiKey.id),
+      timestamp: String(timestamp),
+      // Signatur über einen anderen Body.
+      signature: signVerifyBody(apiKey.id, timestamp, 'POST', '/mcp', '{"manipuliert":true}'),
+      method: 'POST',
+      url: '/mcp',
+      rawBody: Buffer.from('{"jsonrpc":"2.0"}').toString('base64'),
+    }).expect(401);
+
+    expect(res.body.valid).toBe(false);
+    expect(res.body.error).toContain('Signatur');
+  });
+
+  it('bindet die Signatur an die angefragte URL', async () => {
+    const body = '{}';
+    const timestamp = Math.floor(Date.now() / 1000);
+    await verifyRequest({
+      keyId: String(apiKey.id),
+      timestamp: String(timestamp),
+      signature: signVerifyBody(apiKey.id, timestamp, 'POST', '/mcp', body),
+      method: 'POST',
+      url: '/anderer-pfad',
+      rawBody: Buffer.from(body).toString('base64'),
+    }).expect(401);
+  });
+
+  it('lehnt fehlende oder falsche interne Tokens mit 403 ab', async () => {
+    await request(app)
+      .post('/internal/verify-ssh')
+      .send({ keyId: String(apiKey.id) })
+      .expect(403);
+    await request(app)
+      .post('/internal/verify-ssh')
+      .set('x-internal-token', 'falsches-token')
+      .send({ keyId: String(apiKey.id) })
+      .expect(403);
+  });
+
+  it('lehnt unvollständige Payloads mit 400 ab', async () => {
+    const res = await verifyRequest({ keyId: String(apiKey.id) }).expect(400);
+    expect(res.body).toEqual({ valid: false, error: 'Ungültiger Verify-Request' });
   });
 });

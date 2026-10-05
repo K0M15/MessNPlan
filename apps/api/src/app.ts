@@ -4,10 +4,13 @@ import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import helmet from 'helmet';
 import { pinoHttp } from 'pino-http';
+import { z } from 'zod';
 import { allowedOrigins, config, trustProxy } from './config.js';
 import { pingDatabase } from './db/client.js';
+import { ApiError } from './errors.js';
 import { originCheck } from './http/auth.js';
 import { errorHandler, notFoundHandler } from './http/errorHandler.js';
+import { authenticateSshRequest } from './http/sshAuth.js';
 import { logger } from './logger.js';
 import { broadcastToProject } from './realtime.js';
 import { metricsHandler, metricsMiddleware } from './services/metrics.js';
@@ -107,12 +110,16 @@ export function createApp(): express.Express {
   app.use('/api/v1', api);
   app.use('/api', notFoundHandler);
 
-  // Interner Endpunkt für den Worker (Broadcasts nach Job-Verarbeitung).
-  app.post('/internal/broadcast', (req, res) => {
+  // Interne Endpunkte für Worker und MCP-Server (Token = JWT_SECRET).
+  const internalTokenValid = (req: express.Request): boolean => {
     const provided = String(req.headers['x-internal-token'] ?? '');
     const providedHash = createHash('sha256').update(provided).digest();
     const expectedHash = createHash('sha256').update(config.JWT_SECRET).digest();
-    if (!timingSafeEqual(providedHash, expectedHash)) {
+    return timingSafeEqual(providedHash, expectedHash);
+  };
+
+  app.post('/internal/broadcast', (req, res) => {
+    if (!internalTokenValid(req)) {
       res.status(403).json({ type: 'urn:projectplaner:forbidden', title: 'Forbidden', status: 403 });
       return;
     }
@@ -124,6 +131,53 @@ export function createApp(): express.Express {
     }
     broadcastToProject(projectId, body.event, body.payload);
     res.status(204).end();
+  });
+
+  // Der MCP-Server (Streamable HTTP) prüft Signaturen eingehender MCP-Requests
+  // nicht selbst, sondern reicht Header + rohen Body hierher durch. Damit
+  // existiert die SSH-Verifikation (Key-Lookup, Ablauf, Replay, Signatur) nur
+  // einmal – in `authenticateSshRequest` (http/sshAuth.ts).
+  const verifySshSchema = z.object({
+    keyId: z.string().min(1).max(64),
+    timestamp: z.string().min(1).max(64),
+    signature: z
+      .string()
+      .min(1)
+      .max(8_192)
+      .regex(/^[A-Za-z0-9+/]+={0,2}$/, 'Base64 erwartet'),
+    method: z.string().min(1).max(16),
+    url: z.string().min(1).max(2_048),
+    rawBody: z.string().max(6_000_000).default(''),
+  });
+
+  app.post('/internal/verify-ssh', async (req, res) => {
+    if (!internalTokenValid(req)) {
+      res.status(403).json({ type: 'urn:projectplaner:forbidden', title: 'Forbidden', status: 403 });
+      return;
+    }
+    const parsed = verifySshSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ valid: false, error: 'Ungültiger Verify-Request' });
+      return;
+    }
+
+    try {
+      const key = await authenticateSshRequest({
+        keyId: parsed.data.keyId,
+        timestamp: parsed.data.timestamp,
+        signature: parsed.data.signature,
+        method: parsed.data.method,
+        url: parsed.data.url,
+        rawBody: Buffer.from(parsed.data.rawBody, 'base64'),
+      });
+      res.json({ valid: true, projectId: key.projectId, keyName: key.name });
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        res.status(401).json({ valid: false, error: error.message });
+        return;
+      }
+      throw error;
+    }
   });
 
   app.use(notFoundHandler);
