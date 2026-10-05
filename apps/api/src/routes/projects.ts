@@ -3,6 +3,7 @@ import { and, eq, sql } from 'drizzle-orm';
 import {
   holidayCreateSchema,
   projectCreateSchema,
+  projectDeleteSchema,
   projectMemberSchema,
   projectUpdateSchema,
   REALTIME_EVENTS,
@@ -170,7 +171,14 @@ export function projectRoutes(): Router {
 
   router.delete('/:id', async (req, res) => {
     const id = parseId(req.params.id);
-    await ensureProjectAccess(id, req.user!, 'planner');
+    const project = await ensureProjectAccess(id, req.user!, 'planner');
+    const input = parse(projectDeleteSchema, req.body);
+
+    // Schutz vor versehentlichem Löschen: exakte Namensbestätigung.
+    if (input.name.trim() !== project.name.trim()) {
+      throw badRequest('Projektname stimmt nicht überein');
+    }
+
     await db.delete(projects).where(eq(projects.id, id));
     await writeAudit({
       userId: req.user!.id,

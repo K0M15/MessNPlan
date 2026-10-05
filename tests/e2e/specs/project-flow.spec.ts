@@ -173,7 +173,7 @@ test('Projekt mit Aufgabe, Teilaufgabe, Schätzung und FS-Abhängigkeit anlegen'
   } finally {
     // Aufräumen über die API, damit die Projektliste schlank bleibt.
     if (projectId !== null) {
-      await deleteProjectViaApi(page, projectId).catch((error) => {
+      await deleteProjectViaApi(page, projectId, projectName).catch((error) => {
         console.warn(`Cleanup für Projekt ${projectId} fehlgeschlagen:`, error);
       });
     }
