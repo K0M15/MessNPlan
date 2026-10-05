@@ -78,6 +78,10 @@ export const projectMemberSchema = z.object({
   role: z.enum(PROJECT_ROLES).default('member'),
 });
 
+export const projectDeleteSchema = z.object({
+  name: z.string().min(1).max(160),
+});
+
 export const holidayCreateSchema = z.object({
   date: z.coerce.date(),
   name: z.string().min(1).max(160),
@@ -245,6 +249,7 @@ export type CreateUserInput = z.infer<typeof createUserSchema>;
 export type UpdateUserInput = z.infer<typeof updateUserSchema>;
 export type ProjectCreateInput = z.infer<typeof projectCreateSchema>;
 export type ProjectUpdateInput = z.infer<typeof projectUpdateSchema>;
+export type ProjectDeleteInput = z.infer<typeof projectDeleteSchema>;
 export type TaskCreateInput = z.infer<typeof taskCreateSchema>;
 export type TaskUpdateInput = z.infer<typeof taskUpdateSchema>;
 export type TaskMoveInput = z.infer<typeof taskMoveSchema>;

@@ -46,8 +46,14 @@ export function uniqueProjectName(prefix = 'E2E'): string {
   return `${prefix} ${Date.now()}`;
 }
 
-/** Projekt über die API löschen – teilt Cookies/BaseURL mit dem Browser-Kontext. */
-export async function deleteProjectViaApi(page: Page, projectId: number): Promise<void> {
-  const response = await page.request.delete(`/api/v1/projects/${projectId}`);
+/** Projekt über die API löschen (Namensbestätigung) – teilt Cookies/BaseURL mit dem Browser-Kontext. */
+export async function deleteProjectViaApi(
+  page: Page,
+  projectId: number,
+  name: string,
+): Promise<void> {
+  const response = await page.request.delete(`/api/v1/projects/${projectId}`, {
+    data: { name },
+  });
   expect(response.status(), `Projekt ${projectId} über die API löschen`).toBe(204);
 }
