@@ -1,5 +1,6 @@
 import { unprocessable } from '../errors.js';
 import type { PlanningData } from './planningData.js';
+import { buildAbsenceIndex, resourceDaysBetween, type ResourceDay } from './resourceCalendar.js';
 import { taskDurationMinutes } from './scheduler.js';
 
 export interface UtilizationBucketDto {
@@ -17,11 +18,28 @@ export interface UtilizationDto {
 }
 
 const MAX_BUCKETS = 50_000;
+const MAX_SLOT_MINUTES = 60;
+
+/** Zerlegt ein Ressourcen-Tagesfenster in ~stündliche Slots (variable Länge je Wochentag). */
+function daySlots(day: ResourceDay): { startMs: number; minutes: number }[] {
+  if (day.windowMinutes <= 0) return [];
+  const count = Math.max(1, Math.ceil(day.windowMinutes / MAX_SLOT_MINUTES));
+  const lengthMinutes = day.windowMinutes / count;
+  const slots: { startMs: number; minutes: number }[] = [];
+  for (let slot = 0; slot < count; slot++) {
+    slots.push({ startMs: day.startMs + slot * lengthMinutes * 60_000, minutes: lengthMinutes });
+  }
+  return slots;
+}
 
 /**
- * Aggregiert Ressourcen-Auslastung in Zeit-Buckets (Arbeitsstunden-Raster).
- * Näherung: Die Aufwände einer Aufgabe werden gleichmäßig auf ihre Arbeitstage
- * und innerhalb eines Tages gleichmäßig auf die Arbeitsstunden verteilt.
+ * Aggregiert Ressourcen-Auslastung in Zeit-Buckets.
+ *
+ * Kapazitäts- und Belegungs-Slots stammen aus den Wochentags-Arbeitsfenstern der
+ * Ressource (variable Länge je Wochentag; Abwesenheit ⇒ Kapazität 0 am Tag),
+ * NICHT aus dem Projekt-Kalender. Näherung wie bisher: Der Aufwand einer Aufgabe
+ * wird gleichmäßig auf ihre Ressourcen-Arbeitstage und innerhalb eines Tages
+ * gleichmäßig auf dessen Slots verteilt. Bucket-Semantik/DTO bleiben unverändert.
  */
 export function buildUtilization(
   data: PlanningData,
@@ -29,11 +47,10 @@ export function buildUtilization(
   to: Date,
   bucketMinutes: number,
 ): UtilizationDto {
-  const { calendar, resources, tasks } = data;
+  const { resources, tasks } = data;
   const fromMs = from.getTime();
   const toMs = to.getTime();
   if (toMs <= fromMs) throw unprocessable([], 'Zeitraum ist leer');
-  calendar.precomputeRange(fromMs, toMs);
 
   const bucketMs = bucketMinutes * 60_000;
   const bucketCount = Math.ceil((toMs - fromMs) / bucketMs);
@@ -44,10 +61,7 @@ export function buildUtilization(
     );
   }
 
-  const workdayMinutes = calendar.workingHoursPerDay();
-  const hourCount = Math.max(1, Math.ceil(workdayMinutes / 60));
-  const slotMinutes = workdayMinutes / hourCount;
-
+  const absenceIndex = buildAbsenceIndex(data.absences);
   const allocated = new Map<string, number>();
   const capacity = new Map<string, number>();
 
@@ -58,38 +72,44 @@ export function buildUtilization(
     map.set(key, (map.get(key) ?? 0) + minutes);
   };
 
-  // Kapazität: pro Ressource und Arbeits-Slot
-  const rangeDayStarts = calendar.workingDayStartsBetween(fromMs, toMs);
+  // Kapazität: pro Ressource aus deren Tagesfenstern (0 bei Abwesenheit)
   for (const resource of resources) {
-    const capacityPerSlot = resource.capacityMinutesPerDay / hourCount;
-    for (const dayStartMs of rangeDayStarts) {
-      for (let slot = 0; slot < hourCount; slot++) {
-        addValue(capacity, resource.id, dayStartMs + slot * slotMinutes * 60_000, capacityPerSlot);
-      }
+    const ranges = absenceIndex.get(resource.id);
+    const days = resourceDaysBetween(resource, data.project, ranges, fromMs, toMs);
+    for (const day of days) {
+      if (day.capacityMinutes <= 0) continue;
+      const slots = daySlots(day);
+      const perSlot = day.capacityMinutes / slots.length;
+      for (const slot of slots) addValue(capacity, resource.id, slot.startMs, perSlot);
     }
   }
 
-  // Belegung: pro Zuteilung gleichmäßig über Arbeitstage und Slots
+  // Belegung: pro Zuteilung gleichmäßig über die Ressourcen-Arbeitstage und Slots
   const taskById = new Map(tasks.map((t) => [t.id, t]));
+  const resourceById = new Map(resources.map((r) => [r.id, r]));
   for (const assignment of data.assignments) {
     const task = taskById.get(assignment.taskId);
     if (!task?.plannedStart || !task.plannedEnd) continue;
+    const resource = resourceById.get(assignment.resourceId);
+    if (!resource) continue;
     const duration = taskDurationMinutes(task);
     if (duration <= 0) continue;
 
-    const assignmentDayStarts = calendar.workingDayStartsBetween(
+    const days = resourceDaysBetween(
+      resource,
+      data.project,
+      absenceIndex.get(resource.id),
       task.plannedStart.getTime(),
       task.plannedEnd.getTime(),
     );
-    if (assignmentDayStarts.length === 0) continue;
+    if (days.length === 0) continue;
 
-    const perDay = (duration * assignment.allocationPercent) / 100 / assignmentDayStarts.length;
-    const perSlot = perDay / hourCount;
-
-    for (const dayStartMs of assignmentDayStarts) {
-      for (let slot = 0; slot < hourCount; slot++) {
-        addValue(allocated, assignment.resourceId, dayStartMs + slot * slotMinutes * 60_000, perSlot);
-      }
+    const perDay = (duration * assignment.allocationPercent) / 100 / days.length;
+    for (const day of days) {
+      const slots = daySlots(day);
+      if (slots.length === 0) continue;
+      const perSlot = perDay / slots.length;
+      for (const slot of slots) addValue(allocated, assignment.resourceId, slot.startMs, perSlot);
     }
   }
 

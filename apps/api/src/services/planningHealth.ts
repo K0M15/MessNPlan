@@ -6,6 +6,14 @@ import {
 } from '@projectplaner/shared';
 import { topologicalOrder } from './dependencyGraph.js';
 import type { PlanningData, TaskRow } from './planningData.js';
+import {
+  buildAbsenceIndex,
+  capacityMinutesOn,
+  isAbsentOn,
+  isoToEpochDay,
+  resourceDaysBetween,
+  type AbsenceRange,
+} from './resourceCalendar.js';
 import { buildCombinedEdges, taskDurationMinutes } from './scheduler.js';
 
 export interface HealthIssue {
@@ -24,27 +32,43 @@ export interface HealthSummary {
   total: number;
 }
 
-/** Auslastung pro Ressource und Arbeitstag (Minuten). */
-export function computeResourceLoads(data: PlanningData): Map<number, Map<string, number>> {
+/**
+ * Auslastung pro Ressource und Ressourcen-Arbeitstag (Minuten).
+ *
+ * Basis ist der Ressourcen-Kalender (Wochentags-Arbeitszeiten, Abwesenheiten) –
+ * NICHT der Projekt-Kalender: Die Zuteilung wird gleichmäßig auf die
+ * Wochentags-Arbeitstage der Ressource im Aufgabenzetraum verteilt; Abwesenheits-
+ * tage zählen mit (dort ist die Kapazität 0, damit Konflikte sichtbar werden).
+ */
+export function computeResourceLoads(
+  data: PlanningData,
+  absenceIndex: Map<number, AbsenceRange[]> = buildAbsenceIndex(data.absences),
+): Map<number, Map<string, number>> {
   const taskById = new Map(data.tasks.map((t) => [t.id, t]));
+  const resourceById = new Map(data.resources.map((r) => [r.id, r]));
   const loads = new Map<number, Map<string, number>>();
 
   for (const assignment of data.assignments) {
     const task = taskById.get(assignment.taskId);
     if (!task?.plannedStart || !task.plannedEnd) continue;
+    const resource = resourceById.get(assignment.resourceId);
+    if (!resource) continue;
     const duration = taskDurationMinutes(task);
     if (duration <= 0) continue;
 
-    const days = data.calendar.workingDaysBetween(
-      data.calendar.fromDate(task.plannedStart),
-      data.calendar.fromDate(task.plannedEnd),
+    const days = resourceDaysBetween(
+      resource,
+      data.project,
+      absenceIndex.get(resource.id),
+      task.plannedStart.getTime(),
+      task.plannedEnd.getTime(),
     );
     if (days.length === 0) continue;
 
     const perDay = (duration * assignment.allocationPercent) / 100 / days.length;
     const byDay = loads.get(assignment.resourceId) ?? new Map<string, number>();
     for (const day of days) {
-      byDay.set(day, (byDay.get(day) ?? 0) + perDay);
+      byDay.set(day.iso, (byDay.get(day.iso) ?? 0) + perDay);
     }
     loads.set(assignment.resourceId, byDay);
   }
@@ -183,29 +207,60 @@ export function detectIssues(data: PlanningData): HealthIssue[] {
     }
   }
 
-  const loads = computeResourceLoads(data);
+  const absenceIndex = buildAbsenceIndex(data.absences);
+  const loads = computeResourceLoads(data, absenceIndex);
   for (const resource of resources) {
     if (!resource.isActive) continue;
     const byDay = loads.get(resource.id);
     if (byDay) {
-      let maxDay: string | null = null;
-      let maxMinutes = 0;
+      const ranges = absenceIndex.get(resource.id);
+      let absenceDay: { day: string; minutes: number } | null = null;
+      let worstOverload:
+        | { day: string; allocatedMinutes: number; capacityMinutes: number; over: number }
+        | null = null;
+
       for (const [day, minutes] of byDay) {
-        if (minutes > maxMinutes) {
-          maxMinutes = minutes;
-          maxDay = day;
+        if (isAbsentOn(ranges, isoToEpochDay(day))) {
+          if (!absenceDay || minutes > absenceDay.minutes) absenceDay = { day, minutes };
+          continue;
+        }
+        // Überbelegung gegen die ressourcen-eigene Tageskapazität (Arbeitszeiten
+        // abzüglich Abwesenheiten), nicht gegen den Projekt-Kalender.
+        const capacity = capacityMinutesOn(resource, data.project, day, ranges);
+        const over = minutes - capacity;
+        if (over > 0.5 && (!worstOverload || over > worstOverload.over)) {
+          worstOverload = {
+            day,
+            allocatedMinutes: Math.round(minutes),
+            capacityMinutes: Math.round(capacity),
+            over,
+          };
         }
       }
-      if (maxDay && maxMinutes > resource.capacityMinutesPerDay + 0.5) {
+
+      if (absenceDay) {
+        issues.push({
+          rule: HEALTH_RULES.RESOURCE_ASSIGNED_ON_ABSENCE,
+          severity: 'warning',
+          message: `Zuteilung am Abwesenheitstag ${absenceDay.day} (${Math.round(absenceDay.minutes)} Minuten eingeplant)`,
+          resourceId: resource.id,
+          details: {
+            day: absenceDay.day,
+            allocatedMinutes: Math.round(absenceDay.minutes),
+          },
+        });
+      }
+
+      if (worstOverload) {
         issues.push({
           rule: HEALTH_RULES.RESOURCE_OVERALLOCATED,
           severity: 'error',
-          message: `Ressource ist am ${maxDay} überbelegt (${Math.round(maxMinutes)} von ${resource.capacityMinutesPerDay} Minuten)`,
+          message: `Ressource ist am ${worstOverload.day} überbelegt (${worstOverload.allocatedMinutes} von ${worstOverload.capacityMinutes} Minuten)`,
           resourceId: resource.id,
           details: {
-            day: maxDay,
-            allocatedMinutes: Math.round(maxMinutes),
-            capacityMinutes: resource.capacityMinutesPerDay,
+            day: worstOverload.day,
+            allocatedMinutes: worstOverload.allocatedMinutes,
+            capacityMinutes: worstOverload.capacityMinutes,
           },
         });
       }

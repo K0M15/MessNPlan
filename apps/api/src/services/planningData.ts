@@ -1,6 +1,7 @@
 import { eq } from 'drizzle-orm';
 import { db } from '../db/client.js';
 import {
+  absences,
   assignments,
   holidays,
   projects,
@@ -16,6 +17,7 @@ export type ProjectRow = typeof projects.$inferSelect;
 export type TaskRow = typeof tasks.$inferSelect;
 export type ResourceRow = typeof resources.$inferSelect;
 export type AssignmentRow = typeof assignments.$inferSelect;
+export type AbsenceRow = typeof absences.$inferSelect;
 
 export interface PlanningData {
   project: ProjectRow;
@@ -23,6 +25,7 @@ export interface PlanningData {
   edges: DepEdge[];
   resources: ResourceRow[];
   assignments: AssignmentRow[];
+  absences: AbsenceRow[];
   calendar: WorkCalendar;
 }
 
@@ -30,27 +33,43 @@ export async function loadPlanningData(projectId: number): Promise<PlanningData>
   const [project] = await db.select().from(projects).where(eq(projects.id, projectId)).limit(1);
   if (!project) throw notFound('Projekt nicht gefunden');
 
-  const [taskRows, edgeRows, resourceRows, assignmentRows, holidayRows] = await Promise.all([
-    db.select().from(tasks).where(eq(tasks.projectId, projectId)).orderBy(tasks.id),
-    db.select().from(taskDependencies).where(eq(taskDependencies.projectId, projectId)),
-    db.select().from(resources).where(eq(resources.projectId, projectId)),
-    db
-      .select({
-        id: assignments.id,
-        taskId: assignments.taskId,
-        resourceId: assignments.resourceId,
-        allocationPercent: assignments.allocationPercent,
-        plannedStart: assignments.plannedStart,
-        plannedEnd: assignments.plannedEnd,
-        version: assignments.version,
-        createdAt: assignments.createdAt,
-        updatedAt: assignments.updatedAt,
-      })
-      .from(assignments)
-      .innerJoin(tasks, eq(tasks.id, assignments.taskId))
-      .where(eq(tasks.projectId, projectId)),
-    db.select({ date: holidays.date }).from(holidays).where(eq(holidays.projectId, projectId)),
-  ]);
+  const [taskRows, edgeRows, resourceRows, assignmentRows, holidayRows, absenceRows] =
+    await Promise.all([
+      db.select().from(tasks).where(eq(tasks.projectId, projectId)).orderBy(tasks.id),
+      db.select().from(taskDependencies).where(eq(taskDependencies.projectId, projectId)),
+      db.select().from(resources).where(eq(resources.projectId, projectId)),
+      db
+        .select({
+          id: assignments.id,
+          taskId: assignments.taskId,
+          resourceId: assignments.resourceId,
+          allocationPercent: assignments.allocationPercent,
+          plannedStart: assignments.plannedStart,
+          plannedEnd: assignments.plannedEnd,
+          version: assignments.version,
+          createdAt: assignments.createdAt,
+          updatedAt: assignments.updatedAt,
+        })
+        .from(assignments)
+        .innerJoin(tasks, eq(tasks.id, assignments.taskId))
+        .where(eq(tasks.projectId, projectId)),
+      db.select({ date: holidays.date }).from(holidays).where(eq(holidays.projectId, projectId)),
+      db
+        .select({
+          id: absences.id,
+          resourceId: absences.resourceId,
+          startDate: absences.startDate,
+          endDate: absences.endDate,
+          type: absences.type,
+          name: absences.name,
+          createdBy: absences.createdBy,
+          createdAt: absences.createdAt,
+          updatedAt: absences.updatedAt,
+        })
+        .from(absences)
+        .innerJoin(resources, eq(resources.id, absences.resourceId))
+        .where(eq(resources.projectId, projectId)),
+    ]);
 
   const calendar = new WorkCalendar({
     timezone: project.timezone,
@@ -66,6 +85,7 @@ export async function loadPlanningData(projectId: number): Promise<PlanningData>
     edges: edgeRows as DepEdge[],
     resources: resourceRows,
     assignments: assignmentRows,
+    absences: absenceRows,
     calendar,
   };
 }

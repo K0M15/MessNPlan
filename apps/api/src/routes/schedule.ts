@@ -69,7 +69,17 @@ export function scheduleRoutes(): Router {
 
     const utilization = buildUtilization(data, from, to, bucketMinutes);
 
-    res.json({ ...payload, utilization });
+    // Abwesenheiten für die Gantt-Ressourcenzeilen (Markierung) mitliefern.
+    const absenceItems = data.absences.map((absence) => ({
+      id: absence.id,
+      resourceId: absence.resourceId,
+      startDate: absence.startDate,
+      endDate: absence.endDate,
+      type: absence.type,
+      name: absence.name,
+    }));
+
+    res.json({ ...payload, utilization, absences: absenceItems });
   });
 
   router.get('/projects/:projectId/health', async (req, res) => {

@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { DateTime } from 'luxon';
+import { ABSENCE_TYPE_LABELS, type AbsenceType } from '@projectplaner/shared';
 import { useProjectStore } from '@/stores/project';
 import { useToasts } from '@/composables/useToasts';
 import type { ScheduleTaskDto, TaskDto } from '@/types';
@@ -107,6 +109,39 @@ const bucketsByResource = computed(() => {
       capacity: bucket.capacityMinutes,
     });
     map.set(bucket.resourceId, list);
+  }
+  return map;
+});
+
+/** Abwesenheitsfarbe je Art (schraffierte Fläche in der Ressourcenzeile). */
+const ABSENCE_COLORS: Record<AbsenceType, string> = {
+  vacation: '#f59e0b',
+  sick: '#ef4444',
+  other: '#64748b',
+};
+
+/** Abwesenheiten je Ressource als ms-Bereiche (lokaler Tagesbeginn … Folgetag). */
+const absencesByResource = computed(() => {
+  const map = new Map<
+    number,
+    Array<{ start: number; end: number; label: string; color: string }>
+  >();
+  const timezone = store.schedule?.project.timezone ?? 'Europe/Berlin';
+  for (const absence of store.schedule?.absences ?? []) {
+    const start = DateTime.fromISO(absence.startDate, { zone: timezone }).startOf('day').toMillis();
+    const end = DateTime.fromISO(absence.endDate, { zone: timezone })
+      .plus({ days: 1 })
+      .startOf('day')
+      .toMillis();
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) continue;
+    const list = map.get(absence.resourceId) ?? [];
+    list.push({
+      start,
+      end,
+      label: ABSENCE_TYPE_LABELS[absence.type],
+      color: ABSENCE_COLORS[absence.type],
+    });
+    map.set(absence.resourceId, list);
   }
   return map;
 });
@@ -725,6 +760,41 @@ function renderBody(): void {
     const row = rows.value[i]!;
     if (row.kind !== 'resource') continue;
     const rowY = positions[i]! - scrollTop.value;
+
+    // Abwesenheiten schraffieren (Urlaub/Krank/Sonstiges); Balken zeichnen darüber.
+    for (const absence of absencesByResource.value.get(row.resourceId) ?? []) {
+      let x1 = timeToX(absence.start);
+      let x2 = timeToX(absence.end);
+      if (x2 < 0 || x1 > w) continue;
+      x1 = Math.max(0, x1);
+      x2 = Math.min(w, x2);
+      const width = x2 - x1;
+      if (width < 1) continue;
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(x1, rowY, width, RES_ROW_H);
+      ctx.clip();
+      ctx.fillStyle = `${absence.color}18`;
+      ctx.fillRect(x1, rowY, width, RES_ROW_H);
+      ctx.strokeStyle = `${absence.color}88`;
+      ctx.lineWidth = 1;
+      for (let stripe = x1 - RES_ROW_H; stripe < x2 + RES_ROW_H; stripe += 6) {
+        ctx.beginPath();
+        ctx.moveTo(stripe, rowY + RES_ROW_H);
+        ctx.lineTo(stripe + RES_ROW_H, rowY);
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      if (width > 46) {
+        ctx.fillStyle = absence.color;
+        ctx.font = '600 9px system-ui, sans-serif';
+        ctx.textBaseline = 'top';
+        ctx.fillText(absence.label, x1 + 3, rowY + 2);
+      }
+    }
+
     const buckets = bucketsByResource.value.get(row.resourceId) ?? [];
     const bucketMs = (store.schedule?.utilization.bucketMinutes ?? 1440) * 60_000;
 
@@ -732,11 +802,14 @@ function renderBody(): void {
       const x = timeToX(bucket.start);
       const bw = Math.max(1, (bucketMs / 60_000) * pxPerMinute.value - 1);
       if (x + bw < 0 || x > w) continue;
-      const ratio = bucket.capacity > 0 ? bucket.allocated / bucket.capacity : 0;
+      // Kapazität 0 (Abwesenheit) mit Belegung → voller roter Balken.
+      const ratio =
+        bucket.capacity > 0 ? bucket.allocated / bucket.capacity : bucket.allocated > 0 ? 1 : 0;
       const ratioClamped = Math.min(1, ratio);
       const barH = Math.max(2, ratioClamped * (RES_ROW_H - 12));
       const y = rowY + RES_ROW_H - 6 - barH;
-      ctx.fillStyle = ratio > 1.0001 ? '#ef4444' : ratio > 0.8 ? '#f59e0b' : '#10b981';
+      const overloaded = bucket.capacity <= 0 ? bucket.allocated > 0 : bucket.allocated > bucket.capacity * 1.0001;
+      ctx.fillStyle = overloaded ? '#ef4444' : ratio > 0.8 ? '#f59e0b' : '#10b981';
       ctx.globalAlpha = 0.85;
       ctx.fillRect(x, y, bw, barH);
       ctx.globalAlpha = 1;

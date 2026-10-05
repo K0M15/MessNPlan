@@ -7,6 +7,8 @@ import { connectSocket } from '@/api/socket';
 import { useToasts } from '@/composables/useToasts';
 import { useAuthStore } from '@/stores/auth';
 import type {
+  AbsenceDto,
+  AbsenceType,
   ApiKeyDto,
   CommentDto,
   DependencyDto,
@@ -40,6 +42,9 @@ export const useProjectStore = defineStore('project', () => {
   const holidays = ref<HolidayDto[]>([]);
   const taskTree = ref<TaskDto[]>([]);
   const resources = ref<ResourceDto[]>([]);
+  /** Abwesenheiten der zuletzt geladenen Ressource (Ressourcen-Modal). */
+  const resourceAbsences = ref<AbsenceDto[]>([]);
+  const absenceResourceId = ref<number | null>(null);
   const tags = ref<TagDto[]>([]);
   const schedule = ref<GanttPayloadDto | null>(null);
   const health = ref<HealthDto | null>(null);
@@ -99,6 +104,8 @@ export const useProjectStore = defineStore('project', () => {
       selectedTaskId.value = null;
       expandedIds.value = new Set();
       apiKeys.value = [];
+      resourceAbsences.value = [];
+      absenceResourceId.value = null;
     }
     loading.value = true;
     error.value = null;
@@ -673,10 +680,53 @@ export const useProjectStore = defineStore('project', () => {
   async function deleteResource(id: number): Promise<boolean> {
     try {
       await api.del(`/resources/${id}`);
+      if (absenceResourceId.value === id) {
+        resourceAbsences.value = [];
+        absenceResourceId.value = null;
+      }
       await refreshResources();
       return true;
     } catch (err) {
       toasts.error(handleError(err, 'Ressource konnte nicht gelöscht werden'));
+      return false;
+    }
+  }
+
+  // ---- Abwesenheiten -------------------------------------------------------
+
+  async function loadAbsences(resourceId: number): Promise<void> {
+    try {
+      const res = await api.get<{ items: AbsenceDto[] }>(`/resources/${resourceId}/absences`);
+      resourceAbsences.value = res.items;
+      absenceResourceId.value = resourceId;
+    } catch (err) {
+      toasts.error(handleError(err, 'Abwesenheiten konnten nicht geladen werden'));
+    }
+  }
+
+  async function createAbsence(
+    resourceId: number,
+    input: { startDate: string; endDate: string; type: AbsenceType; name?: string | null },
+  ): Promise<boolean> {
+    try {
+      await api.post(`/resources/${resourceId}/absences`, input);
+      await loadAbsences(resourceId);
+      scheduleRefresh();
+      return true;
+    } catch (err) {
+      toasts.error(handleError(err, 'Abwesenheit konnte nicht angelegt werden'));
+      return false;
+    }
+  }
+
+  async function deleteAbsence(id: number): Promise<boolean> {
+    try {
+      await api.del(`/absences/${id}`);
+      if (absenceResourceId.value !== null) await loadAbsences(absenceResourceId.value);
+      scheduleRefresh();
+      return true;
+    } catch (err) {
+      toasts.error(handleError(err, 'Abwesenheit konnte nicht gelöscht werden'));
       return false;
     }
   }
@@ -750,6 +800,8 @@ export const useProjectStore = defineStore('project', () => {
     flatTasks,
     taskById,
     resources,
+    resourceAbsences,
+    absenceResourceId,
     tags,
     schedule,
     health,
@@ -806,6 +858,9 @@ export const useProjectStore = defineStore('project', () => {
     createResource,
     updateResource,
     deleteResource,
+    loadAbsences,
+    createAbsence,
+    deleteAbsence,
     refreshOutlook,
     connectOutlook,
     toggleOutlookSync,
