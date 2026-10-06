@@ -34,6 +34,15 @@ MCP-Client ──HTTPS + SSH-Signatur──▶ MCP-Server (apps/mcp)
   (gleiches Token-Verfahren wie `/internal/broadcast`). Key-Lookup,
   Aktiv-/Ablaufprüfung, Replay-Fenster (±300 s) und Signaturprüfung bleiben in
   `apps/api/src/http/sshAuth.ts` (`authenticateSshRequest`).
+- **Session- und Projektbindung:** Aus der Verify-Antwort übernimmt der
+  MCP-Server Projekt und Schlüsselname und bindet die `mcp-session-id` an den
+  verifizierten Schlüssel – Requests mit fremder Session-ID werden mit `403`
+  abgewiesen, unbekannte oder abgelaufene Sessions mit `404`. Die
+  Projektbindung des Schlüssels wird in der Tool-Schicht erzwungen
+  (`projectId`-Prüfung/-Vorbelegung, gefiltertes `list_projects`).
+- **Schutz am Endpunkt:** In-Memory-Rate-Limit von 60 Requests/Minute je
+  Schlüssel (`429` + `Retry-After`) und Idle-Timeout von 30 Minuten je
+  Session.
 
 ## 2. Client-Konfiguration
 
@@ -144,6 +153,11 @@ Die Schreib-Tools nutzen im REST-Modus die **internen** Endpunkte
 `POST /tasks/{id}/assignments`) und im SSH-Modus die externen Endpunkte
 (`POST /api/v1/external/...`).
 
+Bei projektgebundenen HTTP-Schlüsseln (Streamable HTTP) ist der Parameter
+`projectId` optional: Er wird auf das Projekt des verifizierten Schlüssels
+vorbelegt; eine abweichende Projekt-ID lehnt das Tool mit einem Fehler ab.
+`list_projects` liefert dann ausschließlich dieses Projekt.
+
 ## 5. Sicherheitsmodell
 
 - **MCP-HTTP-Endpunkt:** Jeder Request (auch GET/DELETE/Session-Ende) ist mit
@@ -162,10 +176,22 @@ Die Schreib-Tools nutzen im REST-Modus die **internen** Endpunkte
   API-Zugangsdaten (`PP_EMAIL`/`PP_PASSWORD`). Ein dediziertes Konto mit
   minimal nötiger Rolle (z. B. `planner` nur in den relevanten Projekten)
   verwenden; das Konto kann in der Admin-UI deaktiviert werden.
-- **Sichtbarkeit:** Der HTTP-Endpunkt autorisiert den Client für den
-  MCP-Server als Ganzes; die fachliche Berechtigung folgt aus dem
-  Service-Konto. Wenn verschiedene Aufrufer unterschiedliche Sichten brauchen,
-  je Aufrufergruppe eine eigene MCP-Instanz mit eigenem Konto betreiben.
+- **Session-Bindung:** Die `mcp-session-id` ist an den API-Schlüssel gebunden,
+  der sie initialisiert hat. Ein anderer gültiger Schlüssel erhält `403`,
+  unbekannte/abgelaufene Sessions `404`. Sessions verfallen nach 30 Minuten
+  ohne Request; ein In-Memory-Rate-Limit von 60 Requests/Minute je Schlüssel
+  beantwortet Übermaß mit `429` und `Retry-After`.
+- **Body-Limit:** Der MCP-HTTP-Endpunkt nimmt maximal **4 MiB** pro Request an
+  und lehnt größere mit `413 Payload Too Large` ab. Der interne
+  Verify-Endpunkt der API ist für den base64-kodierten Body mit **8 MB**
+  JSON-Limit konfiguriert (+33 % Base64-Overhead), alle übrigen API-Routen
+  bleiben bei **1 MB** – wirksam für Clients ist damit das 4-MiB-Limit.
+- **Sichtbarkeit:** Der HTTP-Endpunkt authentifiziert den Client per
+  API-Schlüssel und beschränkt ihn auf das Projekt des Schlüssels (Tools
+  erzwingen die Projekt-ID). Die fachliche Berechtigung (Rolle im Projekt)
+  folgt zusätzlich aus dem Service-Konto; für getrennte Sichten je
+  Aufrufergruppe weiterhin eine eigene MCP-Instanz mit eigenem Konto
+  betreiben.
 - **Keine DB-Duplikate:** Validierung/Fachregeln (Zyklen, Constraints,
   Duplikate, Rate-Limits) bleiben in der API; der MCP-Server reicht
   Fehler als Tool-Fehler mit HTTP-Status und Detailtext zurück.
@@ -183,8 +209,9 @@ npx eslint apps/mcp
 ```
 
 Abgedeckt: Env-Validierung, REST-Session inkl. 401-Refresh (Fetch-Mock),
-SSH-Signatur (Ed25519/RSA gegen Test-Keys), Tool-Handler gegen Mock-API,
-`tools/list` über stdio-Subprozess und über signierten Streamable-HTTP-Client
-sowie 401/404/405-Verhalten des HTTP-Endpunkts. Auf API-Seite prüft
-`external-api.integration.test.ts` den Verify-Endpunkt (gültig, falsche
+SSH-Signatur (Ed25519/RSA gegen Test-Keys), Tool-Handler gegen Mock-API
+inklusive Projektbindung, `tools/list` über stdio-Subprozess und über
+signierten Streamable-HTTP-Client sowie 401/403/404/405/429-Verhalten des
+HTTP-Endpunkts (Session-/Key-Bindung, Idle-Timeout, Rate-Limit). Auf API-Seite
+prüft `external-api.integration.test.ts` den Verify-Endpunkt (gültig, falsche
 Signatur, URL-Bindung, Token-/Payload-Fehler).

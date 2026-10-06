@@ -237,20 +237,70 @@ function summarizeGantt(payload: GanttPayload) {
 const projectIdSchema = z.number().int().positive().describe('Projekt-ID');
 
 /**
+ * Projektbindung des Aufrufers (HTTP-Transport: Projekt des verifizierten
+ * API-Schlüssels). Ist `boundProjectId` gesetzt, dürfen alle Tools
+ * ausschließlich dieses Projekt adressieren.
+ */
+export interface ToolScope {
+  boundProjectId?: number;
+}
+
+/**
+ * Eingabefeld für `projectId`: Bei gebundenem Projekt optional (es wird dann
+ * vorbelegt), sonst weiterhin Pflicht.
+ */
+function projectIdInput(scope: ToolScope) {
+  if (scope.boundProjectId === undefined) return projectIdSchema;
+  return projectIdSchema
+    .optional()
+    .describe(
+      `Projekt-ID (optional; der API-Schlüssel ist auf Projekt ${scope.boundProjectId} beschränkt)`,
+    );
+}
+
+/** Erzwingt die Projektbindung und belegt `projectId` ggf. vor. */
+function resolveProjectId(scope: ToolScope, requested: number | undefined): number {
+  const bound = scope.boundProjectId;
+  if (bound === undefined) {
+    if (requested === undefined) {
+      throw new Error('projectId ist erforderlich (keine Projektbindung des API-Schlüssels)');
+    }
+    return requested;
+  }
+  if (requested !== undefined && requested !== bound) {
+    throw new Error(
+      `Projekt ${requested} ist nicht erlaubt: Der API-Schlüssel ist auf Projekt ${bound} beschränkt`,
+    );
+  }
+  return bound;
+}
+
+/**
  * Registriert alle ProjectPlaner-Tools am MCP-Server. Alle Antworten sind
  * kompakte JSON-Strings; Fehler kommen als MCP-Tool-Fehler zurück.
  */
-export function registerTools(server: McpServer, api: TaskApi): void {
+export function registerTools(server: McpServer, api: TaskApi, scope: ToolScope = {}): void {
   server.registerTool(
     'list_projects',
     {
       title: 'Projekte auflisten',
       description:
-        'Listet die für den Service-Account sichtbaren Projekte (ID, Name, Status, Zeitzone, Rolle).',
+        'Listet die für den Service-Account sichtbaren Projekte (ID, Name, Status, Zeitzone, Rolle).' +
+        (scope.boundProjectId === undefined
+          ? ''
+          : ` Der API-Schlüssel ist auf Projekt ${scope.boundProjectId} beschränkt; es wird nur dieses gelistet.`),
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
-    async () => run(async () => ({ projects: (await api.listProjects()).map(pickProject) })),
+    async () =>
+      run(async () => {
+        const projects = await api.listProjects();
+        const visible =
+          scope.boundProjectId === undefined
+            ? projects
+            : projects.filter((project) => project.id === scope.boundProjectId);
+        return { projects: visible.map(pickProject) };
+      }),
   );
 
   server.registerTool(
@@ -260,15 +310,16 @@ export function registerTools(server: McpServer, api: TaskApi): void {
       description:
         'Liefert ein Projekt mit Mitgliedern, kompakter Aufgabenliste und Ressourcen. ' +
         'Aufgabenliste ggf. auf 500 Einträge gekürzt (truncated).',
-      inputSchema: { projectId: projectIdSchema },
+      inputSchema: { projectId: projectIdInput(scope) },
       annotations: { readOnlyHint: true },
     },
     async ({ projectId }) =>
       run(async () => {
+        const pid = resolveProjectId(scope, projectId);
         const [{ project, members }, tasks, resources] = await Promise.all([
-          api.getProject(projectId),
-          api.listTasks(projectId),
-          api.listResources(projectId),
+          api.getProject(pid),
+          api.listTasks(pid),
+          api.listResources(pid),
         ]);
         const limited = tasks.slice(0, 500);
         return {
@@ -303,7 +354,7 @@ export function registerTools(server: McpServer, api: TaskApi): void {
         'nach Status, Elternaufgabe, Ressource und Namenssuche. Bei Baum-Filter bleiben die ' +
         `Eltern der Treffer enthalten. Maximal ${MAX_TASK_LIMIT} Einträge.`,
       inputSchema: {
-        projectId: projectIdSchema,
+        projectId: projectIdInput(scope),
         tree: z.boolean().optional().describe('Verschachtelte Ausgabe (Standard true)'),
         status: z.enum(TASK_STATUSES).optional().describe('Nur Aufgaben mit diesem Status'),
         parentId: z.number().int().positive().optional().describe('Nur direkte Kinder dieser Aufgabe'),
@@ -326,7 +377,7 @@ export function registerTools(server: McpServer, api: TaskApi): void {
     },
     async ({ projectId, tree, status, parentId, resourceId, query, limit }) =>
       run(async () => {
-        const all = await api.listTasks(projectId);
+        const all = await api.listTasks(resolveProjectId(scope, projectId));
         const useTree = tree ?? true;
         const max = limit ?? DEFAULT_TASK_LIMIT;
         const needle = query?.toLowerCase();
@@ -377,7 +428,7 @@ export function registerTools(server: McpServer, api: TaskApi): void {
         'Legt eine Aufgabe (optional als Unteraufgabe) mit Schätzung, Status, Priorität und ' +
         'Constraint an. constraintType "start_no_earlier_than"/"start_on" erfordert constraintDate.',
       inputSchema: {
-        projectId: projectIdSchema,
+        projectId: projectIdInput(scope),
         name: z.string().min(1).max(255),
         parentId: z.number().int().positive().optional().describe('ID der Oberaufgabe'),
         description: z.string().max(20_000).optional(),
@@ -396,7 +447,7 @@ export function registerTools(server: McpServer, api: TaskApi): void {
     async (input) =>
       run(async () => {
         const { projectId, ...rest } = input;
-        const { task } = await api.createTask(projectId, rest);
+        const { task } = await api.createTask(resolveProjectId(scope, projectId), rest);
         return { task: pickTask(task) };
       }),
   );
@@ -409,7 +460,7 @@ export function registerTools(server: McpServer, api: TaskApi): void {
         'Verbindet Vorgänger und Nachfolger (FS/SS/FF/SF, Standard FS) mit optionalem Lag in ' +
         'Minuten (auch negativ). Zyklen werden von der API abgelehnt.',
       inputSchema: {
-        projectId: projectIdSchema,
+        projectId: projectIdInput(scope),
         predecessorId: z.number().int().positive(),
         successorId: z.number().int().positive(),
         type: z.enum(DEPENDENCY_TYPES).optional().describe('Standard FS'),
@@ -418,7 +469,7 @@ export function registerTools(server: McpServer, api: TaskApi): void {
     },
     async ({ projectId, predecessorId, successorId, type, lagMinutes }) =>
       run(async () => {
-        const { dependency } = await api.addDependency(projectId, {
+        const { dependency } = await api.addDependency(resolveProjectId(scope, projectId), {
           predecessorId,
           successorId,
           type: type ?? 'FS',
@@ -444,7 +495,7 @@ export function registerTools(server: McpServer, api: TaskApi): void {
         'Teilt einer Aufgabe eine Ressource zu (Auslastung 1–400 %, Standard 100). ' +
         'Duplikate werden von der API abgelehnt.',
       inputSchema: {
-        projectId: projectIdSchema,
+        projectId: projectIdInput(scope),
         taskId: z.number().int().positive(),
         resourceId: z.number().int().positive(),
         allocationPercent: z.number().int().min(1).max(400).optional().describe('Standard 100'),
@@ -452,7 +503,7 @@ export function registerTools(server: McpServer, api: TaskApi): void {
     },
     async ({ projectId, taskId, resourceId, allocationPercent }) =>
       run(async () => {
-        const { assignment } = await api.assignResource(projectId, taskId, {
+        const { assignment } = await api.assignResource(resolveProjectId(scope, projectId), taskId, {
           resourceId,
           allocationPercent: allocationPercent ?? 100,
         });
@@ -474,9 +525,10 @@ export function registerTools(server: McpServer, api: TaskApi): void {
       description:
         'Stößt die CPM-Neuberechnung des Projekts an und liefert Version, Aufgabenzahl und ' +
         'Anzahl zyklischer Aufgaben. Danach planen get_gantt_summary/get_health den frischen Stand.',
-      inputSchema: { projectId: projectIdSchema },
+      inputSchema: { projectId: projectIdInput(scope) },
     },
-    async ({ projectId }) => run(async () => await api.computeSchedule(projectId)),
+    async ({ projectId }) =>
+      run(async () => await api.computeSchedule(resolveProjectId(scope, projectId))),
   );
 
   server.registerTool(
@@ -487,7 +539,7 @@ export function registerTools(server: McpServer, api: TaskApi): void {
         'Liefert die Health-Findings des Projekts (Schätzungen, Ressourcen, Zyklen, ' +
         'Überbelegung …) inklusive Zusammenfassung pro Severity.',
       inputSchema: {
-        projectId: projectIdSchema,
+        projectId: projectIdInput(scope),
         severity: z.enum(HEALTH_SEVERITIES).optional().describe('Nur Findings dieser Severity'),
         limit: z
           .number()
@@ -501,7 +553,7 @@ export function registerTools(server: McpServer, api: TaskApi): void {
     },
     async ({ projectId, severity, limit }) =>
       run(async () => {
-        const payload = await api.getHealth(projectId);
+        const payload = await api.getHealth(resolveProjectId(scope, projectId));
         const max = limit ?? DEFAULT_ISSUE_LIMIT;
         const filtered =
           severity !== undefined
@@ -525,14 +577,14 @@ export function registerTools(server: McpServer, api: TaskApi): void {
         'Meilensteine und Spitzen-Auslastung je Ressource (nur bei Service-Login verfügbar). ' +
         'from/to sind optionale ISO-8601-Grenzen für die Auslastungsfenster.',
       inputSchema: {
-        projectId: projectIdSchema,
+        projectId: projectIdInput(scope),
         from: z.string().min(1).optional().describe('ISO-8601, z. B. 2026-01-01T00:00:00Z'),
         to: z.string().min(1).optional().describe('ISO-8601, z. B. 2026-03-31T23:59:59Z'),
       },
       annotations: { readOnlyHint: true },
     },
     async ({ projectId, from, to }) =>
-      run(async () => summarizeGantt(await api.getGantt(projectId, { from, to }))),
+      run(async () => summarizeGantt(await api.getGantt(resolveProjectId(scope, projectId), { from, to }))),
   );
 }
 

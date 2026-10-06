@@ -96,6 +96,21 @@ projectplaner-mcp --http --port 3900 --host 0.0.0.0
 - Die Verifikation läuft über den internen API-Endpunkt `POST /internal/verify-ssh`
   (Token `PP_INTERNAL_TOKEN`/`JWT_SECRET`); der MCP-Server dupliziert die
   Signaturlogik nicht.
+- **Session-/Key-Bindung:** Die `mcp-session-id` wird an den verifizierten
+  Schlüssel gebunden. Ein anderer gültiger Schlüssel erhält damit `403`;
+  unbekannte oder per Idle-Timeout (30 min) abgelaufene Sessions `404`.
+- **Projektbindung:** Das Projekt des Schlüssels wird an die Session
+  weitergereicht. Tools dürfen nur dieses Projekt adressieren (fremde
+  `projectId` → Tool-Fehler); `list_projects` liefert nur das gebundene
+  Projekt, fehlende `projectId` wird vorbelegt.
+- **Rate-Limit:** 60 Requests/Minute je API-Schlüssel (gleitendes Fenster);
+  darüber `429 Too Many Requests` mit `Retry-After`-Header.
+- **Body-Limit:** Requests bis **4 MiB** (danach `413 Payload Too Large`).
+  Zum Vergleich: Der interne Verify-Endpunkt der API ist für den zum
+  Verifizieren base64-kodierten Body mit **8 MB** JSON-Limit konfiguriert
+  (+33 % Base64-Overhead), alle übrigen API-Routen bleiben bei **1 MB**.
+  Effektiv limitierend für MCP-Clients ist damit das 4-MiB-Limit am
+  MCP-Endpunkt.
 
 ### Beispiel: signierter Streamable-HTTP-Client (Node)
 
@@ -172,11 +187,16 @@ oder den obigen signierten Client als Brücke einsetzen.
 Alle Antworten sind kompakte JSON-Strings; große Listen werden mit
 `truncated`-Flag gekürzt.
 
+Bei HTTP-Sessions mit projektgebundenem API-Schlüssel ist der `projectId`-
+Parameter optional: Er wird auf das gebundene Projekt vorbelegt, und
+abweichende Projekt-IDs lehnen die Tools mit einem Fehler ab. `list_projects`
+liefert dann ausschließlich das gebundene Projekt.
+
 ## Tests
 
 ```bash
 npm run typecheck -w @projectplaner/mcp
-npm test -w @projectplaner/mcp        # 47 Tests (Unit + stdio-Smoke + HTTP)
+npm test -w @projectplaner/mcp        # 58 Tests (Unit + stdio-Smoke + HTTP)
 npm run build -w @projectplaner/mcp
 npx eslint apps/mcp
 ```
