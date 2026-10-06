@@ -12,10 +12,16 @@ import type { AbsenceRow, ProjectRow, ResourceRow } from './planningData.js';
  * - Default ohne eigene `workingHours`: Projekt-Arbeitswoche × Projekt-Arbeitszeiten
  *   (ohne Feiertagssperre).
  *
+ * DST: Die UTC-Grenzen eines Wochentagsfensters werden je Datum per Luxon-Wall-Clock
+ * (`set`) bestimmt, nicht per ms-Addition an den Tagesbeginn. An Umstellungstagen
+ * hat das Fenster dadurch real 1 h weniger/mehr Minuten; `availableMinutesOn`,
+ * `capacityMinutesOn` und `resourceDaysBetween` liefern die verstrichene Länge.
+ *
  * Performance: Wochentagsfenster werden je Ressourcen-/Projekt-Objekt gecacht;
  * Abwesenheiten liegen als zusammengeführte, sortierte Epoch-Tag-Bereiche vor
- * (Binärsuche statt Tages-Schleifen). Tagesgrenzen werden pro (Zeitzone, Datum)
- * gecacht – keine Luxon-Schleifen über Jahre.
+ * (Binärsuche statt Tages-Schleifen). Die UTC-Grenzen konkreter Tagesfenster
+ * liegen in einem begrenzten FIFO-Cache (Cap `WINDOW_CACHE_LIMIT`), damit der
+ * Speicher nicht mit der Zahl der angefragten (Zeitzone, Datum)-Paare wächst.
  */
 
 export interface WorkWindow {
@@ -79,17 +85,64 @@ export function addIsoDays(iso: string, days: number): string {
   return new Date(Date.UTC(year!, month! - 1, day!) + days * DAY_MS).toISOString().slice(0, 10);
 }
 
-const dayStartCache = new Map<string, number>();
+/** UTC-Grenzen eines lokalen Tagesfensters (aus Wall-Clock abgeleitet). */
+interface DayWindowBounds {
+  startMs: number;
+  endMs: number;
+  minutes: number;
+}
 
-/** UTC-Millisekunden des lokalen Tagesbeginns (gecacht, Luxon nur beim ersten Mal). */
-function localDayStartMs(timezone: string, iso: string): number {
-  const key = `${timezone}|${iso}`;
-  let value = dayStartCache.get(key);
-  if (value === undefined) {
-    value = DateTime.fromISO(iso, { zone: timezone }).startOf('day').toMillis();
-    dayStartCache.set(key, value);
+/** Cap des Fenster-Caches: FIFO, älteste Einträge zuerst. */
+const WINDOW_CACHE_LIMIT = 2000;
+
+const windowBoundsCache = new Map<string, DayWindowBounds | null>();
+
+/** Fügt in einen Map-Cache ein und entfernt bei Erreichen des Caps den ältesten Eintrag. */
+function setBounded<K, V>(cache: Map<K, V>, key: K, value: V): void {
+  if (!cache.has(key) && cache.size >= WINDOW_CACHE_LIMIT) {
+    const oldest = cache.keys().next().value;
+    if (oldest !== undefined) cache.delete(oldest);
   }
-  return value;
+  cache.set(key, value);
+}
+
+/**
+ * UTC-Grenzen eines Wochentagsfensters an einem konkreten Datum. Start/Ende
+ * werden per Luxon-Wall-Clock (`set`) bestimmt, damit DST-Umstellungstage
+ * korrekt sind; `minutes` ist die tatsächlich verstrichene Fensterlänge.
+ * Ergebnis wird begrenzt gecacht – der Cache beeinflusst nur die Performance.
+ */
+function windowBoundsFor(
+  timezone: string,
+  iso: string,
+  window: WorkWindow,
+): DayWindowBounds | null {
+  const key = `${timezone}|${iso}|${window.startMinutes}|${window.endMinutes}`;
+  const cached = windowBoundsCache.get(key);
+  if (cached !== undefined) return cached;
+
+  const base = DateTime.fromISO(iso, { zone: timezone });
+  let bounds: DayWindowBounds | null = null;
+  if (base.isValid) {
+    const start = base.set({
+      hour: Math.floor(window.startMinutes / 60),
+      minute: window.startMinutes % 60,
+      second: 0,
+      millisecond: 0,
+    });
+    const end = base.set({
+      hour: Math.floor(window.endMinutes / 60),
+      minute: window.endMinutes % 60,
+      second: 0,
+      millisecond: 0,
+    });
+    const startMs = start.toMillis();
+    const endMs = end.toMillis();
+    if (endMs > startMs) bounds = { startMs, endMs, minutes: (endMs - startMs) / 60_000 };
+  }
+
+  setBounded(windowBoundsCache, key, bounds);
+  return bounds;
 }
 
 function isoAtMs(ms: number, timezone: string): string | null {
@@ -221,7 +274,10 @@ export function isAvailableOn(
   return !isAbsentOn(absences, isoToEpochDay(isoDate));
 }
 
-/** Verfügbare Minuten am Tag: 0 außerhalb der Arbeitswoche, 0 bei Abwesenheit, sonst Fensterlänge. */
+/**
+ * Verfügbare Minuten am Tag: 0 außerhalb der Arbeitswoche, 0 bei Abwesenheit,
+ * sonst die an diesem Datum tatsächlich verstrichene Fensterlänge (DST-korrekt).
+ */
 export function availableMinutesOn(
   resource: ResourceLike,
   project: ProjectLike,
@@ -231,7 +287,7 @@ export function availableMinutesOn(
   const window = resourceWorkWindows(resource, project).get(isoWeekday(isoDate));
   if (!window) return 0;
   if (isAbsentOn(absences, isoToEpochDay(isoDate))) return 0;
-  return window.minutes;
+  return windowBoundsFor(project.timezone, isoDate, window)?.minutes ?? 0;
 }
 
 /** Effektive Tageskapazität: min(`capacityMinutesPerDay`, Fensterlänge); 0 bei Abwesenheit. */
@@ -269,18 +325,20 @@ export function resourceDaysBetween(
   for (let guard = 0; guard < MAX_RANGE_DAYS && iso <= toIso; guard++) {
     const window = windows.get(isoWeekday(iso));
     if (window) {
-      const absent = isAbsentOn(absences, isoToEpochDay(iso));
-      const startMs = localDayStartMs(project.timezone, iso) + window.startMinutes * 60_000;
-      days.push({
-        iso,
-        startMs,
-        endMs: startMs + window.minutes * 60_000,
-        windowMinutes: window.minutes,
-        absent,
-        capacityMinutes: absent
-          ? 0
-          : Math.max(0, Math.min(resource.capacityMinutesPerDay, window.minutes)),
-      });
+      const bounds = windowBoundsFor(project.timezone, iso, window);
+      if (bounds) {
+        const absent = isAbsentOn(absences, isoToEpochDay(iso));
+        days.push({
+          iso,
+          startMs: bounds.startMs,
+          endMs: bounds.endMs,
+          windowMinutes: bounds.minutes,
+          absent,
+          capacityMinutes: absent
+            ? 0
+            : Math.max(0, Math.min(resource.capacityMinutesPerDay, bounds.minutes)),
+        });
+      }
     }
     iso = addIsoDays(iso, 1);
   }

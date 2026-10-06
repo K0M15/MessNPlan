@@ -2,6 +2,7 @@ import { DateTime } from 'luxon';
 import { describe, expect, it } from 'vitest';
 import type { WorkingHours } from '@projectplaner/shared';
 import {
+  addIsoDays,
   availableMinutesOn,
   buildAbsenceIndex,
   capacityMinutesOn,
@@ -157,6 +158,78 @@ describe('resourceDaysBetween', () => {
     const r = resource(null);
     const days = resourceDaysBetween(r, project, undefined, ms(SATURDAY + 'T00:00'), ms(SUNDAY + 'T23:59'));
     expect(days).toEqual([]);
+  });
+});
+
+describe('resourceDaysBetween – DST-Umstellungstage (Europe/Berlin)', () => {
+  // 2026-03-29 (Sonntag): Sommerzeitbeginn. 2026-10-25 (Sonntag): Sommerzeitende.
+  it('Fenster 08:00–16:00 startet in UTC korrekt (eigene Sonntagsarbeitszeit)', () => {
+    const r = resource({ '0': { start: '08:00', end: '16:00' } });
+    const spring = resourceDaysBetween(r, project, undefined, ms('2026-03-29T00:00'), ms('2026-03-29T23:59'));
+    expect(spring).toHaveLength(1);
+    expect(spring[0]).toMatchObject({
+      iso: '2026-03-29',
+      startMs: Date.UTC(2026, 2, 29, 6, 0), // 08:00 CEST
+      endMs: Date.UTC(2026, 2, 29, 14, 0),
+      windowMinutes: 480,
+      capacityMinutes: 480,
+    });
+
+    const fall = resourceDaysBetween(r, project, undefined, ms('2026-10-25T00:00'), ms('2026-10-25T23:59'));
+    expect(fall).toHaveLength(1);
+    expect(fall[0]).toMatchObject({
+      iso: '2026-10-25',
+      startMs: Date.UTC(2026, 9, 25, 7, 0), // 08:00 CET
+      endMs: Date.UTC(2026, 9, 25, 15, 0),
+      windowMinutes: 480,
+      capacityMinutes: 480,
+    });
+  });
+
+  it('Fenster 00:00–08:00 enthält die Umstellung: 420 bzw. 540 Minuten', () => {
+    const r = resource({ '0': { start: '00:00', end: '08:00' } });
+    const spring = resourceDaysBetween(r, project, undefined, ms('2026-03-29T00:00'), ms('2026-03-29T23:59'));
+    expect(spring[0]).toMatchObject({
+      startMs: Date.UTC(2026, 2, 28, 23, 0), // 00:00 CET
+      endMs: Date.UTC(2026, 2, 29, 6, 0), // 08:00 CEST
+      windowMinutes: 420,
+      capacityMinutes: 420,
+    });
+
+    const fall = resourceDaysBetween(r, project, undefined, ms('2026-10-25T00:00'), ms('2026-10-25T23:59'));
+    expect(fall[0]).toMatchObject({
+      startMs: Date.UTC(2026, 9, 24, 22, 0), // 00:00 CEST
+      endMs: Date.UTC(2026, 9, 25, 7, 0), // 08:00 CET
+      windowMinutes: 540,
+      capacityMinutes: 480, // capacityMinutesPerDay bleibt Obergrenze
+    });
+  });
+
+  it('availableMinutesOn/capacityMinutesOn sind DST-korrekt', () => {
+    const r = resource({ '0': { start: '00:00', end: '08:00' } });
+    expect(availableMinutesOn(r, project, '2026-03-29')).toBe(420);
+    expect(capacityMinutesOn(r, project, '2026-03-29')).toBe(420);
+    expect(availableMinutesOn(r, project, '2026-10-25')).toBe(540);
+    expect(capacityMinutesOn(r, project, '2026-10-25')).toBe(480);
+  });
+});
+
+describe('begrenzter Tagesfenster-Cache', () => {
+  it('liefert nach Überschreiten des Caps weiterhin korrekte Werte (FIFO-Eviction)', () => {
+    const r = resource({ '0': { start: '08:00', end: '16:00' } });
+    let iso = '2000-01-02'; // Sonntag
+    for (let i = 0; i < 2100; i++) {
+      expect(availableMinutesOn(r, project, iso)).toBe(480);
+      iso = addIsoDays(iso, 7);
+    }
+
+    // Nach vielen Evictions bleiben DST-Fenster unverändert korrekt.
+    const spring = resourceDaysBetween(r, project, undefined, ms('2026-03-29T00:00'), ms('2026-03-29T23:59'));
+    expect(spring[0]).toMatchObject({
+      startMs: Date.UTC(2026, 2, 29, 6, 0),
+      windowMinutes: 480,
+    });
+    expect(availableMinutesOn(r, project, '2026-10-25')).toBe(480);
   });
 });
 
