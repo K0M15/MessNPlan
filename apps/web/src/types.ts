@@ -241,8 +241,18 @@ export interface UtilizationDto {
   buckets: UtilizationBucketDto[];
 }
 
-export interface GanttPayloadDto extends SchedulePayloadDto {
-  utilization: UtilizationDto;
+/** Schlanker Gantt-Payload: Stammdaten kommen aus /tasks, hier nur Berechnetes. */
+export interface ScheduleBarDto {
+  id: number;
+  critical: boolean;
+  slackMinutes: number;
+}
+
+export interface GanttPayloadDto {
+  project: SchedulePayloadDto['project'];
+  version: number;
+  tasks: ScheduleBarDto[];
+  edges: SchedulePayloadDto['edges'];
   absences: GanttAbsenceDto[];
 }
 

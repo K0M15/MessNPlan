@@ -188,6 +188,14 @@ Review-Fixes (2026-10-06, Findings aus dem Code-Review):
 - **Externe API**: Pre-Auth-IP-Limit + Replay-Cache; Doku in `docs/API-external.md` aktualisiert.
 - **Backup-Service** mit `pipefail`/Temp-Datei/`gzip -t`; **CSP** auf `connect-src 'self'`; diverse Nits (myRole, Tag-Dedupe, Admin-Race via Row-Locks, clearCookie, Schema-Refinements).
 
+Gantt-UX (2026-10-06, Branch `feature/gantt-ux`):
+- **Performance:** schlanker Gantt-Payload (Bars aus Task-Stammdaten) + ETag/304 + separater, zoomabhängiger Auslastungs-Endpoint; Broadcast-Refresh verkleinert (`schedule:updated` → nur Schedule; `task:changed` → debounced nur Tasks).
+- **Optimistisches Bearbeiten:** Verschieben/Verlängern/Verkürzen wirkt sofort lokal (Store-Overrides mit 15-s-TTL, Rollback bei Fehlern); der Server-Plan folgt per Broadcast.
+- **Auto-Save** im Aufgaben-Drawer (Debounce 1 s, Flush bei Tab-Wechsel/Schließen/Aufgabenwechsel, Statusanzeige statt Speichern-Button); dirty-Eingaben werden von Server-Refreshes nicht überschrieben.
+- **Auswahl = Anlegen:** Abhängigkeits- und Ressourcen-Dropdown legen den Eintrag sofort an (Richtung/Typ/Lag bzw. Allocation vorwählbar); Typ/Lag bestehender Abhängigkeiten sind inline editierbar; das Ressourcen-Select zeigt nur noch nicht zugeteilte Ressourcen.
+- **Fixe Gantt-Achse (Variante A):** Start = Projektanker (frühere Aufgaben erweitern nur nach links), Ende mindestens 5 Jahre in der Zukunft; Achse wächst nur; Buttons „Zum Anker"/„Heute"; Zoom-Cap ~1,5 px/min; **mittlere Maustaste** verschiebt die Zeitachse (x+y), `auxclick` unterdrückt.
+- **Betrieb:** Rate-Limits per Env übersteuerbar (`LOGIN_RATE_LIMIT`/`REFRESH_RATE_LIMIT`), Web-Healthcheck über HTTPS korrigiert.
+
 ## 11. Nächste Schritte
 
 1. **Outlook gegen echten M365-Tenant**: Azure-App registrieren (Redirect `GRAPH_REDIRECT_URI`, delegated `Calendars.ReadWrite`, `offline_access`, `User.Read`), Verbindung testen; danach Inbound (Delta-Query) und Webhooks ergänzen.
@@ -224,6 +232,9 @@ Review-Fixes (2026-10-06, Findings aus dem Code-Review):
 | 2026-10-05 | Container-DB über `DB_*`-Variablen statt interpolierter `DATABASE_URL` | Sonderzeichen im Passwort, Compose kann nicht URL-encoden |
 | 2026-10-06 | Refresh-Grace-Fenster 30 s nur für **rotierte** Tokens (`replaced_by_hash`) | Multi-Tab/Retries ohne erzwungenen Logout; Logout/Admin-Widerruf bleiben sofort wirksam |
 | 2026-10-06 | Externe API: Replay-Cache identischer Signaturen + Pre-Auth-IP-Limit | Signatur-Diebstahl/Retries und unbegrenzte Verify-Kosten verhindern |
+| 2026-10-06 | Gantt: optimistische UI + schlanker Payload (Bars aus Tasks, Utilization separat, ETag) | Drag/Pin ohne Server-Wartezeit, weniger Transfer |
+| 2026-10-06 | Auto-Save statt Speichern-Button (Flush bei Tab-/Aufgabenwechsel) | Weniger Klicks, keine verlorenen Eingaben |
+| 2026-10-06 | Fixe Gantt-Achse ab Projektanker, ≥ 5 Jahre, wächst nur | Stabile Timeline, weit vorausplanbar |
 
 ## 13. Bekannte Stolperfallen
 
@@ -251,3 +262,7 @@ Review-Fixes (2026-10-06, Findings aus dem Code-Review):
 - **Parallele Planberechnung:** `computeSchedule` serialisiert per MySQL-`GET_LOCK`; ein zweiter Aufruf erhält `503` „Planung läuft bereits" (manueller POST + Worker).
 - **Externe API:** Identische Signatur zweimal = `401` Replay; Clients signieren jeden Request mit frischem Timestamp. Pre-Auth-Limit 60/min pro IP (Dev 600).
 - **Backup-Service:** schreibt nur vollständige Dumps (Temp-Datei + `gzip -t` + `pipefail`); Fehlschläge landen als Klartext-Hinweis im Log statt als kaputte `.sql.gz`.
+- **Gantt-Payload ist aufgeteilt:** `GET /gantt` liefert nur `tasks: [{id, critical, slackMinutes}]`, `edges`, `absences` und ein ETag (`"gv<version>"`, 304 bei `If-None-Match`); Balkenzeiten kommen aus `/tasks?tree=1`. Die Auslastung lädt separat `GET /projects/:id/utilisation?from&to&bucketMinutes` (Kapazitätsdaten enden ~90 Tage nach dem letzten Planende). Wer neue Gantt-Felder braucht: erst prüfen, ob sie nicht schon in den Task-Stammdaten stehen.
+- **Auto-Save im TaskDrawer:** Debounce 1 s; Flush bei Tab-Wechsel, Schließen und Aufgabenwechsel. Server-Refreshes überschreiben keine dirty-Eingaben (`syncForm` prüft `isDirty`); der Status „Gespeichert ✓" wird nur beim Aufgabenwechsel zurückgesetzt.
+- **Login-Rate-Limit für E2E/Prod-Builds:** Default 20/15 min im Prod-Modus – für Serienläufe `LOGIN_RATE_LIMIT=1000` (und `REFRESH_RATE_LIMIT=2000`) beim Compose-`up` setzen; die Variablen sind in `.env.example` dokumentiert.
+- **Web-Healthcheck:** prüft HTTPS mit `--no-check-certificate` (`https://127.0.0.1/healthz`); die frühere HTTP-Prüfung scheiterte am 308-Redirect von Caddy.

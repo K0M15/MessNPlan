@@ -23,6 +23,7 @@ import type {
   TagDto,
   TaskDto,
   UserLookupDto,
+  UtilizationDto,
 } from '@/types';
 
 interface CreateTaskInput {
@@ -47,6 +48,26 @@ export const useProjectStore = defineStore('project', () => {
   const absenceResourceId = ref<number | null>(null);
   const tags = ref<TagDto[]>([]);
   const schedule = ref<GanttPayloadDto | null>(null);
+  const utilisation = ref<UtilizationDto | null>(null);
+  /** ETag des zuletzt geladenen Gantt-Payloads (304-Abgleich). */
+  let ganttEtag: string | null = null;
+  /** Letzte bekannte Schedule-Version – steuert, wann Overrides/Health aktualisiert werden. */
+  let knownScheduleVersion = 0;
+  /**
+   * Lokale, optimistische Änderungen (Drag/Pin), die Server-Refreshes überleben,
+   * bis die Planversion steigt oder die TTL abläuft.
+   */
+  const optimisticOverrides = new Map<
+    number,
+    {
+      plannedStart?: string | null;
+      plannedEnd?: string | null;
+      estimatedMinutes?: number | null;
+      constraintType?: TaskDto['constraintType'];
+      constraintDate?: string | null;
+      expiresAt: number;
+    }
+  >();
   const health = ref<HealthDto | null>(null);
   const outlook = ref<OutlookConnectionsDto | null>(null);
   const apiKeys = ref<ApiKeyDto[]>([]);
@@ -69,7 +90,6 @@ export const useProjectStore = defineStore('project', () => {
   let socket: Socket | null = null;
   /** Projekt, dessen Room der aktuelle Socket (wieder) betreten soll. */
   let joinedProjectId: number | null = null;
-  let refreshTimer: number | undefined;
 
   const flatTasks = computed<TaskDto[]>(() => {
     const out: TaskDto[] = [];
@@ -112,13 +132,13 @@ export const useProjectStore = defineStore('project', () => {
     loading.value = true;
     error.value = null;
     try {
-      const [projectRes, taskRes, resourceRes, tagRes, scheduleRes, healthRes, outlookRes] =
+      const [projectRes, taskRes, resourceRes, tagRes, ganttRes, healthRes, outlookRes] =
         await Promise.all([
           api.get<{ project: ProjectDto; members: MemberDto[] }>(`/projects/${id}`),
           api.get<{ items: TaskDto[] }>(`/projects/${id}/tasks?tree=1`),
           api.get<{ items: ResourceDto[] }>(`/projects/${id}/resources`),
           api.get<{ items: TagDto[] }>(`/projects/${id}/tags`),
-          api.get<GanttPayloadDto>(`/projects/${id}/gantt`),
+          api.getConditional<GanttPayloadDto>(`/projects/${id}/gantt`, null),
           api.get<HealthDto>(`/projects/${id}/health`),
           api.get<OutlookConnectionsDto>(`/projects/${id}/outlook/connections`),
         ]);
@@ -127,9 +147,12 @@ export const useProjectStore = defineStore('project', () => {
       taskTree.value = taskRes.items;
       resources.value = resourceRes.items;
       tags.value = tagRes.items;
-      schedule.value = scheduleRes;
+      schedule.value = ganttRes.data ?? null;
+      ganttEtag = ganttRes.etag ?? null;
+      knownScheduleVersion = ganttRes.data?.version ?? 0;
       health.value = healthRes;
       outlook.value = outlookRes;
+      void refreshUtilisation().catch(() => undefined);
       // Elternknoten initial aufklappen, damit die Struktur sichtbar ist.
       const parents = new Set<number>();
       const collect = (nodes: TaskDto[]): void => {
@@ -154,11 +177,101 @@ export const useProjectStore = defineStore('project', () => {
     if (projectId.value === null) return;
     const res = await api.get<{ items: TaskDto[] }>(`/projects/${projectId.value}/tasks?tree=1`);
     taskTree.value = res.items;
+    applyOptimisticOverrides();
+  }
+
+  function applyOptimisticOverrides(): void {
+    const now = Date.now();
+    for (const [id, override] of optimisticOverrides) {
+      if (override.expiresAt <= now) {
+        optimisticOverrides.delete(id);
+        continue;
+      }
+      const task = taskById.value.get(id);
+      if (!task) {
+        optimisticOverrides.delete(id);
+        continue;
+      }
+      if (override.plannedStart !== undefined) task.plannedStart = override.plannedStart;
+      if (override.plannedEnd !== undefined) task.plannedEnd = override.plannedEnd;
+      if (override.estimatedMinutes !== undefined) task.estimatedMinutes = override.estimatedMinutes;
+      if (override.constraintType !== undefined) task.constraintType = override.constraintType;
+      if (override.constraintDate !== undefined) task.constraintDate = override.constraintDate;
+    }
+  }
+
+  /**
+   * Wendet eine lokale (optimistische) Änderung sofort an und liefert eine
+   * Rollback-Funktion. Die Werte überleben Server-Refreshes, bis die
+   * Planversion steigt (Compute fertig) oder die TTL abläuft.
+   */
+  function applyOptimisticTask(
+    taskId: number,
+    patch: {
+      plannedStart?: string | null;
+      plannedEnd?: string | null;
+      estimatedMinutes?: number | null;
+      constraintType?: TaskDto['constraintType'];
+      constraintDate?: string | null;
+    },
+    ttlMs = 15_000,
+  ): () => void {
+    const task = taskById.value.get(taskId);
+    if (!task) return () => {};
+    const previous = {
+      plannedStart: task.plannedStart,
+      plannedEnd: task.plannedEnd,
+      estimatedMinutes: task.estimatedMinutes,
+      constraintType: task.constraintType,
+      constraintDate: task.constraintDate,
+    };
+    if (patch.plannedStart !== undefined) task.plannedStart = patch.plannedStart;
+    if (patch.plannedEnd !== undefined) task.plannedEnd = patch.plannedEnd;
+    if (patch.estimatedMinutes !== undefined) task.estimatedMinutes = patch.estimatedMinutes;
+    if (patch.constraintType !== undefined) task.constraintType = patch.constraintType;
+    if (patch.constraintDate !== undefined) task.constraintDate = patch.constraintDate;
+
+    optimisticOverrides.set(taskId, { ...patch, expiresAt: Date.now() + ttlMs });
+    return () => {
+      optimisticOverrides.delete(taskId);
+      Object.assign(task, previous);
+    };
   }
 
   async function refreshSchedule(): Promise<void> {
     if (projectId.value === null) return;
-    schedule.value = await api.get<GanttPayloadDto>(`/projects/${projectId.value}/gantt`);
+    const res = await api.getConditional<GanttPayloadDto>(
+      `/projects/${projectId.value}/gantt`,
+      ganttEtag,
+    );
+    if (res.notModified || !res.data) return;
+
+    schedule.value = res.data;
+    ganttEtag = res.etag ?? null;
+
+    if (res.data.version !== knownScheduleVersion) {
+      knownScheduleVersion = res.data.version;
+      // Neue Planversion: optimistische Overrides sind eingerechnet.
+      optimisticOverrides.clear();
+      scheduleHealthRefresh();
+      scheduleUtilisationRefresh();
+    }
+  }
+
+  async function refreshUtilisation(params?: {
+    from?: string;
+    to?: string;
+    bucketMinutes?: number;
+  }): Promise<void> {
+    if (projectId.value === null) return;
+    const qs = new URLSearchParams();
+    if (params?.from) qs.set('from', params.from);
+    if (params?.to) qs.set('to', params.to);
+    if (params?.bucketMinutes) qs.set('bucketMinutes', String(params.bucketMinutes));
+    const suffix = qs.size > 0 ? `?${qs.toString()}` : '';
+    utilisation.value = await api.get<UtilizationDto>(
+      `/projects/${projectId.value}/utilisation${suffix}`,
+    );
   }
 
   async function refreshResources(): Promise<void> {
@@ -231,7 +344,7 @@ export const useProjectStore = defineStore('project', () => {
     try {
       await api.patch(`/projects/${projectId.value}`, patch, project.value.version);
       await refreshProject();
-      scheduleRefresh();
+      void refreshData();
       return true;
     } catch (err) {
       toasts.error(handleError(err, 'Projekt konnte nicht gespeichert werden'));
@@ -250,7 +363,7 @@ export const useProjectStore = defineStore('project', () => {
     try {
       await api.post(`/projects/${projectId.value}/holidays`, { date: dateISO, name });
       await loadHolidays();
-      scheduleRefresh();
+      void refreshData();
       return true;
     } catch (err) {
       toasts.error(handleError(err, 'Feiertag konnte nicht angelegt werden'));
@@ -263,7 +376,7 @@ export const useProjectStore = defineStore('project', () => {
     try {
       await api.del(`/projects/${projectId.value}/holidays/${id}`);
       await loadHolidays();
-      scheduleRefresh();
+      void refreshData();
       return true;
     } catch (err) {
       toasts.error(handleError(err, 'Feiertag konnte nicht gelöscht werden'));
@@ -339,11 +452,37 @@ export const useProjectStore = defineStore('project', () => {
     }
   }
 
-  function scheduleRefresh(): void {
-    window.clearTimeout(refreshTimer);
-    refreshTimer = window.setTimeout(() => {
-      void refreshData();
-    }, 400);
+  let tasksTimer: ReturnType<typeof setTimeout> | undefined;
+  let healthTimer: ReturnType<typeof setTimeout> | undefined;
+  let utilisationTimer: ReturnType<typeof setTimeout> | undefined;
+  let projectTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function scheduleTasksRefresh(): void {
+    clearTimeout(tasksTimer);
+    tasksTimer = setTimeout(() => {
+      void refreshTasks().catch(() => undefined);
+    }, 300);
+  }
+
+  function scheduleHealthRefresh(): void {
+    clearTimeout(healthTimer);
+    healthTimer = setTimeout(() => {
+      void refreshHealth().catch(() => undefined);
+    }, 800);
+  }
+
+  function scheduleUtilisationRefresh(): void {
+    clearTimeout(utilisationTimer);
+    utilisationTimer = setTimeout(() => {
+      void refreshUtilisation().catch(() => undefined);
+    }, 600);
+  }
+
+  function scheduleProjectRefresh(): void {
+    clearTimeout(projectTimer);
+    projectTimer = setTimeout(() => {
+      void Promise.all([refreshResources(), refreshTags(), refreshOutlook()]).catch(() => undefined);
+    }, 300);
   }
 
   /**
@@ -370,9 +509,14 @@ export const useProjectStore = defineStore('project', () => {
     socket.on('connect', joinRoom);
     // Ist der Socket bereits verbunden, sofort beitreten; sonst übernimmt das der connect-Handler.
     if (socket.connected) joinRoom();
-    socket.on(REALTIME_EVENTS.SCHEDULE_UPDATED, () => scheduleRefresh());
-    socket.on(REALTIME_EVENTS.TASK_CHANGED, () => scheduleRefresh());
-    socket.on(REALTIME_EVENTS.PROJECT_CHANGED, () => scheduleRefresh());
+    socket.on(REALTIME_EVENTS.SCHEDULE_UPDATED, () => {
+      void refreshSchedule().catch(() => undefined);
+    });
+    socket.on(REALTIME_EVENTS.TASK_CHANGED, () => scheduleTasksRefresh());
+    socket.on(REALTIME_EVENTS.PROJECT_CHANGED, () => {
+      scheduleTasksRefresh();
+      scheduleProjectRefresh();
+    });
     socket.on(
       REALTIME_EVENTS.PRESENCE_STATE,
       (
@@ -439,6 +583,14 @@ export const useProjectStore = defineStore('project', () => {
     joinedProjectId = null;
     presence.value = [];
     presenceSelections.value = new Map();
+    clearTimeout(tasksTimer);
+    clearTimeout(healthTimer);
+    clearTimeout(utilisationTimer);
+    clearTimeout(projectTimer);
+    optimisticOverrides.clear();
+    ganttEtag = null;
+    knownScheduleVersion = 0;
+    utilisation.value = null;
   }
 
   function setSelection(taskId: number | null): void {
@@ -478,14 +630,19 @@ export const useProjectStore = defineStore('project', () => {
   async function updateTask(
     taskId: number,
     patch: Record<string, unknown>,
+    options?: {
+      /** Lokale Sofort-Änderung fürs Gantt; wird bei Fehlern zurückgerollt. */
+      optimistic?: Parameters<typeof applyOptimisticTask>[1];
+    },
   ): Promise<boolean> {
     const task = taskById.value.get(taskId);
     if (!task) return false;
+    const rollback = options?.optimistic ? applyOptimisticTask(taskId, options.optimistic) : null;
     try {
       await api.patch(`/tasks/${taskId}`, patch, task.version);
-      await refreshTasks();
       return true;
     } catch (err) {
+      rollback?.();
       toasts.error(handleError(err, 'Aufgabe konnte nicht gespeichert werden'));
       return false;
     }
@@ -524,6 +681,7 @@ export const useProjectStore = defineStore('project', () => {
     try {
       await api.post(`/projects/${projectId.value}/schedule`, {});
       await refreshData();
+      await refreshUtilisation().catch(() => undefined);
       toasts.success('Plan neu berechnet');
     } catch (err) {
       toasts.error(handleError(err, 'Neuberechnung fehlgeschlagen'));
@@ -736,7 +894,7 @@ export const useProjectStore = defineStore('project', () => {
     try {
       await api.post(`/resources/${resourceId}/absences`, input);
       await loadAbsences(resourceId);
-      scheduleRefresh();
+      void refreshData();
       return true;
     } catch (err) {
       toasts.error(handleError(err, 'Abwesenheit konnte nicht angelegt werden'));
@@ -748,7 +906,7 @@ export const useProjectStore = defineStore('project', () => {
     try {
       await api.del(`/absences/${id}`);
       if (absenceResourceId.value !== null) await loadAbsences(absenceResourceId.value);
-      scheduleRefresh();
+      void refreshData();
       return true;
     } catch (err) {
       toasts.error(handleError(err, 'Abwesenheit konnte nicht gelöscht werden'));
@@ -829,6 +987,7 @@ export const useProjectStore = defineStore('project', () => {
     absenceResourceId,
     tags,
     schedule,
+    utilisation,
     health,
     loading,
     error,
@@ -844,6 +1003,8 @@ export const useProjectStore = defineStore('project', () => {
     refreshData,
     refreshTasks,
     refreshSchedule,
+    refreshUtilisation,
+    applyOptimisticTask,
     refreshHealth,
     refreshTags,
     refreshProject,

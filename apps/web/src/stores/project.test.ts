@@ -52,7 +52,7 @@ const socketMock = vi.hoisted((): MockSocket => {
   return socket;
 });
 
-const apiMock = vi.hoisted(() => ({ get: vi.fn() }));
+const apiMock = vi.hoisted(() => ({ get: vi.fn(), getConditional: vi.fn() }));
 
 vi.mock('socket.io-client', () => ({ io: vi.fn(() => socketMock) }));
 
@@ -69,6 +69,7 @@ vi.mock('@/api/client', () => ({
   },
   api: {
     get: apiMock.get,
+    getConditional: apiMock.getConditional,
     post: vi.fn(),
     patch: vi.fn(),
     put: vi.fn(),
@@ -98,11 +99,10 @@ function apiResponse(path: string): unknown {
         version: 1,
         tasks: [],
         edges: [],
-        resources: [],
-        assignments: [],
-        utilization: { from: '', to: '', bucketMinutes: 60, buckets: [] },
         absences: [],
       };
+    case `/projects/${PROJECT_ID}/utilisation`:
+      return { from: '', to: '', bucketMinutes: 60, buckets: [] };
     case `/projects/${PROJECT_ID}/health`:
       return { issues: [], summary: { error: 0, warning: 0, info: 0, total: 0 } };
     case `/projects/${PROJECT_ID}/outlook/connections`:
@@ -116,7 +116,11 @@ describe('useProjectStore – Realtime-Room', () => {
   beforeEach(() => {
     socketMock.reset();
     apiMock.get.mockReset();
+    apiMock.getConditional.mockReset();
     apiMock.get.mockImplementation((path: string) => Promise.resolve(apiResponse(path)));
+    apiMock.getConditional.mockImplementation((path: string) =>
+      Promise.resolve({ notModified: false, data: apiResponse(path), etag: '"gv1"' }),
+    );
     setActivePinia(createPinia());
   });
 
@@ -166,5 +170,41 @@ describe('useProjectStore – Realtime-Room', () => {
 
     store.setSelection(11);
     expect(socketMock.emit).not.toHaveBeenCalledWith('presence:selection', expect.anything());
+  });
+
+  it('behält optimistische Drag-Werte über Server-Refreshes und rollt bei Bedarf zurück', async () => {
+    const store = useProjectStore();
+    const baseTask = {
+      id: 1,
+      projectId: PROJECT_ID,
+      parentId: null,
+      name: 'Aufgabe',
+      plannedStart: '2026-10-05T06:00:00.000Z',
+      plannedEnd: '2026-10-05T14:00:00.000Z',
+      estimatedMinutes: 480,
+      version: 1,
+    };
+    apiMock.get.mockImplementation((path: string) => {
+      if (path === `/projects/${PROJECT_ID}/tasks?tree=1`) {
+        return Promise.resolve({ items: [baseTask] });
+      }
+      return Promise.resolve(apiResponse(path));
+    });
+
+    await store.load(PROJECT_ID);
+    expect(store.taskById.get(1)?.plannedStart).toBe(baseTask.plannedStart);
+
+    const rollback = store.applyOptimisticTask(1, {
+      plannedStart: '2026-10-06T06:00:00.000Z',
+      plannedEnd: '2026-10-06T14:00:00.000Z',
+    });
+    expect(store.taskById.get(1)?.plannedStart).toBe('2026-10-06T06:00:00.000Z');
+
+    // Server liefert noch die alten Zeiten (Compute läuft) → Override bleibt bestehen.
+    await store.refreshTasks();
+    expect(store.taskById.get(1)?.plannedStart).toBe('2026-10-06T06:00:00.000Z');
+
+    rollback();
+    expect(store.taskById.get(1)?.plannedStart).toBe(baseTask.plannedStart);
   });
 });

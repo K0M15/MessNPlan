@@ -103,6 +103,9 @@ jobs:
           # .env.example ist auf Dev ausgelegt; für den Prod-Stack überschreiben.
           APP_ORIGIN: https://localhost
           COOKIE_SECURE: "true"
+          # E2E-Serienläufe: Login-/Refresh-Limit anheben (Default prod 20/120).
+          LOGIN_RATE_LIMIT: "1000"
+          REFRESH_RATE_LIMIT: "2000"
         run: docker compose up -d api worker web
       - name: Auf die App warten
         run: |

@@ -33,9 +33,44 @@ const form = reactive({
   actualEndLocal: '',
 });
 
+// ---- Auto-Save (Deklarationen vor dem Watcher, der sofort feuert) ----------
+
+const saving = ref(false);
+const savedAt = ref<number | null>(null);
+const saveError = ref<string | null>(null);
+let autosaveTimer: number | undefined;
+let lastSyncedTaskId: number | null = null;
+let lastSavedSnapshot = '';
+
+function formSnapshot(): string {
+  return JSON.stringify({
+    name: form.name,
+    description: form.description,
+    hours: form.hours,
+    status: form.status,
+    priority: form.priority,
+    progress: form.progress,
+    isMilestone: form.isMilestone,
+    constraintType: form.constraintType,
+    constraintLocal: form.constraintLocal,
+    actualStartLocal: form.actualStartLocal,
+    actualEndLocal: form.actualEndLocal,
+  });
+}
+
+function isDirty(): boolean {
+  return formSnapshot() !== lastSavedSnapshot;
+}
+
 function syncForm(): void {
   const task = store.selectedTask;
   if (!task) return;
+  // Nutzereingaben nicht durch Server-Refreshes überschreiben: Bei einem
+  // Aufgabenwechsel wird immer synchronisiert, sonst nur wenn das Formular
+  // unverändert ist (kein laufender Auto-Save).
+  const isNewTask = lastSyncedTaskId !== task.id;
+  if (!isNewTask && isDirty()) return;
+
   form.name = task.name;
   form.description = task.description ?? '';
   form.hours = task.estimatedMinutes !== null ? String(task.estimatedMinutes / 60) : '';
@@ -47,16 +82,31 @@ function syncForm(): void {
   form.constraintLocal = toZoneInput(task.constraintDate, timezone.value);
   form.actualStartLocal = toZoneInput(task.actualStart, timezone.value);
   form.actualEndLocal = toZoneInput(task.actualEnd, timezone.value);
+  lastSyncedTaskId = task.id;
+  // Frischer Snapshot: Ein Auto-Save läuft nur bei echten Änderungen.
+  // (savedAt/saveError bleiben erhalten – Server-Refreshes nach dem eigenen
+  // Speichern sollen die Statusanzeige nicht sofort wieder ausblenden.)
+  lastSavedSnapshot = formSnapshot();
 }
 
 watch(
   () => [store.selectedTaskId, store.selectedTask?.version] as const,
-  async () => {
+  async (current, previous) => {
+    // Aufgabenwechsel: zuerst den Formularstand der VORHERIGEN Aufgabe sichern.
+    const previousId = previous?.[0];
+    if (previousId !== undefined && previousId !== current[0]) {
+      await flushPendingSave();
+    }
     syncForm();
+    if (previousId !== undefined && previousId !== current[0]) {
+      // Neuer Task: Statusanzeige des vorherigen Saves zurücksetzen.
+      savedAt.value = null;
+      saveError.value = null;
+    }
     const id = store.selectedTaskId;
     if (id === null) return;
     try {
-      const [deps, comments, ] = await Promise.all([
+      const [deps, comments] = await Promise.all([
         store.loadDependencies(id),
         store.loadComments(id),
       ]);
@@ -87,33 +137,90 @@ const newDep = reactive({
 const newAssignment = reactive({ resourceId: '', allocation: 100 });
 const newComment = ref('');
 
-async function save(): Promise<void> {
-  const task = store.selectedTask;
-  if (!task) return;
+/** Ressourcen, die der Aufgabe noch nicht zugeteilt sind (Select-Optionen). */
+const unassignedResources = computed(() => {
+  const assigned = new Set((store.selectedTask?.assignments ?? []).map((a) => a.resourceId));
+  return store.resources.filter((resource) => !assigned.has(resource.id));
+});
+
+function scheduleAutoSave(): void {
+  window.clearTimeout(autosaveTimer);
+  autosaveTimer = window.setTimeout(() => {
+    void save();
+  }, 1000);
+}
+
+// Jede Änderung an den Detailfeldern plant ein Debounce-Speichern (1 s) ein.
+watch(form, () => scheduleAutoSave(), { deep: true });
+
+/** Speichert den aktuellen Formularstand für eine konkrete Aufgabe. */
+async function persistForm(taskId: number): Promise<boolean> {
+  if (!isDirty()) return true;
   // <input type="number"> liefert mit v-model eine Zahl (oder '' im leeren Feld).
   const rawHours = form.hours === null || form.hours === undefined ? '' : String(form.hours);
   const hours = rawHours.trim() === '' ? null : Number(rawHours.replace(',', '.'));
   if (hours !== null && (!Number.isFinite(hours) || hours < 0)) {
     toasts.error('Ungültige Stundenzahl');
-    return;
+    return false;
   }
-  const ok = await store.updateTask(task.id, {
-    name: form.name.trim() || task.name,
-    description: form.description,
-    estimatedMinutes: hours === null ? null : Math.round(hours * 60),
-    status: form.status,
-    priority: form.priority,
-    progress: Number(form.progress),
-    isMilestone: form.isMilestone,
-    constraintType: form.constraintType,
-    constraintDate:
-      form.constraintType === 'asap'
-        ? null
-        : fromZoneInput(form.constraintLocal, timezone.value),
-    actualStart: fromZoneInput(form.actualStartLocal, timezone.value),
-    actualEnd: fromZoneInput(form.actualEndLocal, timezone.value),
-  });
-  if (ok) toasts.success('Aufgabe gespeichert');
+
+  saving.value = true;
+  saveError.value = null;
+  try {
+    const ok = await store.updateTask(taskId, {
+      name: form.name.trim() || 'Aufgabe',
+      description: form.description,
+      estimatedMinutes: hours === null ? null : Math.round(hours * 60),
+      status: form.status,
+      priority: form.priority,
+      progress: Number(form.progress),
+      isMilestone: form.isMilestone,
+      constraintType: form.constraintType,
+      constraintDate:
+        form.constraintType === 'asap'
+          ? null
+          : fromZoneInput(form.constraintLocal, timezone.value),
+      actualStart: fromZoneInput(form.actualStartLocal, timezone.value),
+      actualEnd: fromZoneInput(form.actualEndLocal, timezone.value),
+    });
+    if (ok) {
+      lastSavedSnapshot = formSnapshot();
+      savedAt.value = Date.now();
+    } else {
+      saveError.value = 'Speichern fehlgeschlagen';
+    }
+    return ok;
+  } finally {
+    saving.value = false;
+  }
+}
+
+async function save(): Promise<boolean> {
+  const task = store.selectedTask;
+  if (!task) return true;
+  return persistForm(task.id);
+}
+
+/**
+ * Sicheres Speichern vor Tab-Wechsel, Schließen oder Aufgabenwechsel:
+ * adressiert bewusst den zuletzt synchronisierten Task (nicht die neue Auswahl).
+ */
+async function flushPendingSave(): Promise<void> {
+  window.clearTimeout(autosaveTimer);
+  if (lastSyncedTaskId === null || !isDirty()) return;
+  const task = store.taskById.get(lastSyncedTaskId);
+  if (!task) return;
+  await persistForm(task.id);
+}
+
+function changeTab(key: 'details' | 'deps' | 'resources' | 'comments'): void {
+  void flushPendingSave();
+  tab.value = key;
+}
+
+function closeDrawer(): void {
+  void flushPendingSave();
+  store.setSelection(null);
 }
 
 async function unpin(): Promise<void> {
@@ -179,6 +286,19 @@ async function removeDependency(id: number): Promise<void> {
   successors.value = deps.successors;
 }
 
+/** Inline-Änderung an Typ/Lag einer bestehenden Abhängigkeit. */
+async function updateDependencyFields(
+  id: number,
+  patch: { type?: DependencyType; lagMinutes?: number },
+): Promise<void> {
+  const task = store.selectedTask;
+  if (!task) return;
+  if (!(await store.updateDependency(id, patch))) return;
+  const deps = await store.loadDependencies(task.id);
+  predecessors.value = deps.predecessors;
+  successors.value = deps.successors;
+}
+
 async function addAssignment(): Promise<void> {
   const task = store.selectedTask;
   if (!task || newAssignment.resourceId === '') return;
@@ -220,7 +340,7 @@ async function removeTask(): Promise<void> {
 /** ESC schließt das Sheet, ohne die Formularwerte zu speichern. */
 function onKeydown(event: KeyboardEvent): void {
   if (event.key === 'Escape' && store.selectedTaskId !== null) {
-    store.setSelection(null);
+    closeDrawer();
   }
 }
 
@@ -239,7 +359,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
         type="button"
         class="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
         aria-label="Schließen"
-        @click="store.setSelection(null)"
+        @click="closeDrawer"
       >
         ✕
       </button>
@@ -261,7 +381,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
             ? 'border-b-2 border-indigo-600 font-medium text-indigo-700'
             : 'text-slate-500 hover:text-slate-800'
         "
-        @click="tab = t.key"
+        @click="changeTab(t.key)"
       >
         {{ t.label }}
       </button>
@@ -395,12 +515,27 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
           <h3 class="mb-2 text-xs font-medium uppercase tracking-wide text-slate-400">Vorgänger</h3>
           <p v-if="predecessors.length === 0" class="text-slate-500">Keine Vorgänger</p>
           <ul v-else class="space-y-1">
-            <li v-for="dep in predecessors" :key="dep.id" class="flex items-center justify-between rounded-md bg-slate-50 px-2 py-1.5">
-              <span class="truncate">
-                {{ dep.predecessorName }}
-                <span class="text-xs text-slate-400">{{ DEPENDENCY_TYPE_LABELS[dep.type] }} · {{ dep.lagMinutes }} min</span>
-              </span>
-              <button v-if="store.canWrite" type="button" class="text-xs text-red-500 hover:underline" @click="removeDependency(dep.id)">entfernen</button>
+            <li v-for="dep in predecessors" :key="dep.id" class="rounded-md bg-slate-50 px-2 py-1.5">
+              <div class="flex items-center justify-between gap-2">
+                <span class="truncate">{{ dep.predecessorName }}</span>
+                <button v-if="store.canWrite" type="button" class="shrink-0 text-xs text-red-500 hover:underline" @click="removeDependency(dep.id)">entfernen</button>
+              </div>
+              <div v-if="store.canWrite" class="mt-1 flex items-center gap-2">
+                <select
+                  :value="dep.type"
+                  class="rounded border border-slate-200 px-1 py-0.5 text-xs"
+                  @change="updateDependencyFields(dep.id, { type: ($event.target as HTMLSelectElement).value as DependencyType })"
+                >
+                  <option v-for="(label, type) in DEPENDENCY_TYPE_LABELS" :key="type" :value="type">{{ label }}</option>
+                </select>
+                <input
+                  :value="dep.lagMinutes"
+                  type="number"
+                  class="w-20 rounded border border-slate-200 px-1 py-0.5 text-xs"
+                  @change="updateDependencyFields(dep.id, { lagMinutes: Number(($event.target as HTMLInputElement).value) })"
+                />
+                <span class="text-xs text-slate-400">min Lag</span>
+              </div>
             </li>
           </ul>
         </div>
@@ -408,12 +543,27 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
           <h3 class="mb-2 text-xs font-medium uppercase tracking-wide text-slate-400">Nachfolger</h3>
           <p v-if="successors.length === 0" class="text-slate-500">Keine Nachfolger</p>
           <ul v-else class="space-y-1">
-            <li v-for="dep in successors" :key="dep.id" class="flex items-center justify-between rounded-md bg-slate-50 px-2 py-1.5">
-              <span class="truncate">
-                {{ dep.successorName }}
-                <span class="text-xs text-slate-400">{{ DEPENDENCY_TYPE_LABELS[dep.type] }} · {{ dep.lagMinutes }} min</span>
-              </span>
-              <button v-if="store.canWrite" type="button" class="text-xs text-red-500 hover:underline" @click="removeDependency(dep.id)">entfernen</button>
+            <li v-for="dep in successors" :key="dep.id" class="rounded-md bg-slate-50 px-2 py-1.5">
+              <div class="flex items-center justify-between gap-2">
+                <span class="truncate">{{ dep.successorName }}</span>
+                <button v-if="store.canWrite" type="button" class="shrink-0 text-xs text-red-500 hover:underline" @click="removeDependency(dep.id)">entfernen</button>
+              </div>
+              <div v-if="store.canWrite" class="mt-1 flex items-center gap-2">
+                <select
+                  :value="dep.type"
+                  class="rounded border border-slate-200 px-1 py-0.5 text-xs"
+                  @change="updateDependencyFields(dep.id, { type: ($event.target as HTMLSelectElement).value as DependencyType })"
+                >
+                  <option v-for="(label, type) in DEPENDENCY_TYPE_LABELS" :key="type" :value="type">{{ label }}</option>
+                </select>
+                <input
+                  :value="dep.lagMinutes"
+                  type="number"
+                  class="w-20 rounded border border-slate-200 px-1 py-0.5 text-xs"
+                  @change="updateDependencyFields(dep.id, { lagMinutes: Number(($event.target as HTMLInputElement).value) })"
+                />
+                <span class="text-xs text-slate-400">min Lag</span>
+              </div>
             </li>
           </ul>
         </div>
@@ -425,19 +575,23 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
               <option value="pred">Diese Aufgabe hat einen Vorgänger</option>
               <option value="succ">Diese Aufgabe hat einen Nachfolger</option>
             </select>
-            <select v-model="newDep.taskId" class="w-full rounded-md border border-slate-200 px-2 py-2 text-sm">
-              <option value="" disabled>Aufgabe wählen…</option>
-              <option v-for="t in otherTasks" :key="t.id" :value="String(t.id)">{{ t.name }}</option>
-            </select>
             <div class="grid grid-cols-2 gap-2">
               <select v-model="newDep.type" class="w-full rounded-md border border-slate-200 px-2 py-2 text-sm">
                 <option v-for="(label, type) in DEPENDENCY_TYPE_LABELS" :key="type" :value="type">{{ label }}</option>
               </select>
               <input v-model.number="newDep.lag" type="number" placeholder="Lag (min)" class="w-full rounded-md border border-slate-200 px-2 py-2 text-sm" />
             </div>
-            <button type="button" class="w-full rounded-md bg-slate-800 px-3 py-2 text-sm text-white hover:bg-slate-700" @click="addDependency">
-              Hinzufügen
-            </button>
+            <select
+              v-model="newDep.taskId"
+              class="w-full rounded-md border border-slate-200 px-2 py-2 text-sm"
+              @change="addDependency()"
+            >
+              <option value="" disabled>Aufgabe wählen – wird sofort übernommen…</option>
+              <option v-for="t in otherTasks" :key="t.id" :value="String(t.id)">{{ t.name }}</option>
+            </select>
+            <p class="text-xs text-slate-400">
+              Die Auswahl legt die Abhängigkeit mit Richtung, Typ und Lag sofort an.
+            </p>
           </div>
         </div>
       </div>
@@ -472,12 +626,16 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
 
         <div v-if="store.canWrite" class="rounded-lg border border-slate-200 p-3">
           <div class="flex gap-2">
-            <select v-model="newAssignment.resourceId" class="min-w-0 flex-1 rounded-md border border-slate-200 px-2 py-2 text-sm">
-              <option value="" disabled>Ressource wählen…</option>
-              <option v-for="r in store.resources" :key="r.id" :value="String(r.id)">{{ r.name }}</option>
+            <select
+              v-model="newAssignment.resourceId"
+              class="min-w-0 flex-1 rounded-md border border-slate-200 px-2 py-2 text-sm"
+              @change="addAssignment()"
+            >
+              <option value="" disabled>Ressource wählen – wird sofort zugeteilt…</option>
+              <option v-for="r in unassignedResources" :key="r.id" :value="String(r.id)">{{ r.name }}</option>
             </select>
             <input v-model.number="newAssignment.allocation" type="number" min="1" max="400" class="w-20 rounded-md border border-slate-200 px-2 py-2 text-sm" />
-            <button type="button" class="rounded-md bg-slate-800 px-3 py-2 text-sm text-white hover:bg-slate-700" @click="addAssignment">+</button>
+            <span class="self-center text-xs text-slate-400">%</span>
           </div>
         </div>
       </div>
@@ -516,18 +674,13 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
       </div>
     </div>
 
-    <!-- Persistenter Fuß: Speichern wirkt auf die Detailfelder, unabhängig vom aktiven Tab. -->
+    <!-- Fuß: Auto-Save-Status statt Speichern-Button (speichert debounced + beim Tab-Wechsel). -->
     <footer class="flex shrink-0 flex-wrap items-center gap-2 border-t border-slate-100 bg-white px-4 py-3">
-      <button
-        v-if="store.canWrite"
-        type="button"
-        class="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
-        @click="save"
-      >
-        Speichern
-      </button>
-      <span v-if="store.canWrite && tab !== 'details'" class="hidden text-xs text-slate-400 md:inline">
-        Speichert die Felder im Tab „Details“
+      <span v-if="store.canWrite" class="text-xs" :class="saveError ? 'text-red-600' : 'text-slate-400'">
+        <template v-if="saving">Speichert…</template>
+        <template v-else-if="saveError">Nicht gespeichert – wird erneut versucht</template>
+        <template v-else-if="savedAt">Gespeichert ✓</template>
+        <template v-else>Änderungen werden automatisch gespeichert</template>
       </span>
       <button
         v-if="store.canPlan"

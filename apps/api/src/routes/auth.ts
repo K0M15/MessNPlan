@@ -11,7 +11,7 @@ import {
 } from '../auth/tokens.js';
 import { db } from '../db/client.js';
 import { refreshTokens, users } from '../db/schema.js';
-import { isDevelopment } from '../config.js';
+import { config, isDevelopment } from '../config.js';
 import { forbidden, tooManyRequests, unauthorized } from '../errors.js';
 import {
   clearAuthCookies,
@@ -72,8 +72,9 @@ export function authRoutes(): Router {
 
   const loginLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    // In Entwicklung (und damit auch E2E-Läufen gegen den Dev-Stack) großzügiger.
-    limit: isDevelopment ? 100 : 20,
+    // In Entwicklung (und damit auch E2E-Läufen gegen den Dev-Stack) großzügiger;
+    // per LOGIN_RATE_LIMIT übersteuerbar (E2E gegen Prod-Build).
+    limit: config.LOGIN_RATE_LIMIT ?? (isDevelopment ? 100 : 20),
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     handler: (_req, _res, next) => next(tooManyRequests('Zu viele Login-Versuche, bitte warten')),
@@ -82,7 +83,7 @@ export function authRoutes(): Router {
   // Refresh wird häufig aufgerufen (15-min-Access-Token, Multi-Tab) – moderates Limit.
   const refreshLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    limit: isDevelopment ? 400 : 120,
+    limit: config.REFRESH_RATE_LIMIT ?? (isDevelopment ? 400 : 120),
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     handler: (_req, _res, next) =>
