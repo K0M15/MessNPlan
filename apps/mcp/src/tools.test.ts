@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createMcpServer } from './server.js';
-import { TOOL_NAMES } from './tools.js';
+import { TOOL_NAMES, type ToolScope } from './tools.js';
 import {
   ApiError,
   UnsupportedOperationError,
@@ -118,8 +118,8 @@ function fakeApi(overrides: Partial<TaskApi> = {}): TaskApi {
   };
 }
 
-async function connect(api: TaskApi) {
-  const server = createMcpServer(api);
+async function connect(api: TaskApi, scope?: ToolScope) {
+  const server = createMcpServer(api, scope);
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
   const client = new Client({ name: 'test-client', version: '1.0.0' });
@@ -329,5 +329,67 @@ describe('MCP-Tools', () => {
     const response = await callTool(client, 'create_task', { projectId: 1, name: 'X' });
     expect(response.isError).toBe(true);
     expect(response.content[0]?.text).toBe('HTTP 409: Duplikat');
+  });
+
+  it('list_projects filtert bei Projektbindung auf das gebundene Projekt', async () => {
+    const api = fakeApi({
+      listProjects: vi.fn(async () => [project({ id: 1 }), project({ id: 2, name: 'Projekt B' })]),
+    });
+    const { client, server } = await connect(api, { boundProjectId: 1 });
+    const result = parseJson(await callTool(client, 'list_projects', {})) as {
+      projects: Array<{ id: number }>;
+    };
+    expect(result.projects.map((p) => p.id)).toEqual([1]);
+    await server.close();
+  });
+
+  it('weist Tool-Aufrufe mit fremder projectId als Fehler ab', async () => {
+    const api = fakeApi();
+    const { client, server } = await connect(api, { boundProjectId: 1 });
+    const response = await callTool(client, 'create_task', { projectId: 2, name: 'Fremd' });
+    expect(response.isError).toBe(true);
+    expect(response.content[0]?.text).toContain('beschränkt');
+    expect(api.createTask).not.toHaveBeenCalled();
+    await server.close();
+  });
+
+  it('prüft die Projektbindung auch bei lesenden Tools', async () => {
+    const api = fakeApi();
+    const { client, server } = await connect(api, { boundProjectId: 1 });
+    const response = await callTool(client, 'get_gantt_summary', { projectId: 2 });
+    expect(response.isError).toBe(true);
+    expect(response.content[0]?.text).toContain('beschränkt');
+    expect(api.getGantt).not.toHaveBeenCalled();
+    await server.close();
+  });
+
+  it('belegt die projectId bei Projektbindung vor', async () => {
+    const api = fakeApi();
+    const { client, server } = await connect(api, { boundProjectId: 1 });
+    const response = await callTool(client, 'create_task', { name: 'Ohne ID' });
+    expect(response.isError).toBeUndefined();
+    expect(api.createTask).toHaveBeenCalledWith(1, { name: 'Ohne ID' });
+    await server.close();
+  });
+
+  it('leitet get_project ohne projectId an das gebundene Projekt', async () => {
+    const api = fakeApi();
+    const { client, server } = await connect(api, { boundProjectId: 3 });
+    const response = await callTool(client, 'get_project', {});
+    expect(response.isError).toBeUndefined();
+    expect(api.getProject).toHaveBeenCalledWith(3);
+    await server.close();
+  });
+
+  it('lässt ohne Projektbindung weiterhin alle Projekte durch', async () => {
+    const api = fakeApi({
+      listProjects: vi.fn(async () => [project({ id: 1 }), project({ id: 2 })]),
+    });
+    const { client, server } = await connect(api);
+    const result = parseJson(await callTool(client, 'list_projects', {})) as {
+      projects: Array<{ id: number }>;
+    };
+    expect(result.projects.map((p) => p.id)).toEqual([1, 2]);
+    await server.close();
   });
 });
