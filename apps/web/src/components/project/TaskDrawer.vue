@@ -212,8 +212,9 @@ async function removeTask(): Promise<void> {
   const task = store.selectedTask;
   if (!task) return;
   if (!window.confirm(`Aufgabe „${task.name}“ inklusive Teilaufgaben löschen?`)) return;
-  await store.deleteTask(task.id);
-  toasts.success('Aufgabe gelöscht');
+  if (await store.deleteTask(task.id)) {
+    toasts.success('Aufgabe gelöscht');
+  }
 }
 
 /** ESC schließt das Sheet, ohne die Formularwerte zu speichern. */

@@ -4,6 +4,7 @@ import { DateTime } from 'luxon';
 import { ABSENCE_TYPE_LABELS, type AbsenceType } from '@projectplaner/shared';
 import { useProjectStore } from '@/stores/project';
 import { useToasts } from '@/composables/useToasts';
+import { formatDateTime } from '@/utils/datetime';
 import type { ScheduleTaskDto, TaskDto } from '@/types';
 
 const store = useProjectStore();
@@ -470,7 +471,14 @@ async function commitDrag(): Promise<void> {
       constraintDate: newStart.toISOString(),
     });
     if (ok) {
-      toasts.success('Aufgabe gepinnt (nicht früher als ' + newStart.toLocaleString('de-DE') + ')');
+      toasts.success(
+        'Aufgabe gepinnt (nicht früher als ' +
+          formatDateTime(
+            newStart.toISOString(),
+            store.schedule?.project.timezone ?? 'Europe/Berlin',
+          ) +
+          ')',
+      );
     }
   } else {
     const durationMs = state.origEndMs - state.origStartMs;
