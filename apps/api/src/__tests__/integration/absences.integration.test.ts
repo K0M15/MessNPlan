@@ -76,11 +76,14 @@ describe('Abwesenheiten + Ressourcen-Arbeitszeiten', () => {
     expect(issues.some((issue) => issue.rule === HEALTH_RULES.RESOURCE_ASSIGNED_ON_ABSENCE)).toBe(false);
   });
 
-  it('Kapazitäts-Buckets im Gantt folgen der Ressourcen-Arbeitszeit', async () => {
-    const res = await adminAgent.get(`/api/v1/projects/${projectId}/gantt`).expect(200);
-    const bucket = (res.body.utilization.buckets as Array<Record<string, unknown>>).find(
-      (entry) =>
-        entry.resourceId === resourceId && entry.start === '2026-10-05T08:00:00.000Z',
+  it('Kapazitäts-Buckets in der Auslastung folgen der Ressourcen-Arbeitszeit', async () => {
+    const res = await adminAgent
+      .get(
+        `/api/v1/projects/${projectId}/utilisation?from=2026-10-05T00:00:00.000Z&to=2026-10-06T00:00:00.000Z&bucketMinutes=1440`,
+      )
+      .expect(200);
+    const bucket = (res.body.buckets as Array<Record<string, unknown>>).find(
+      (entry) => entry.resourceId === resourceId,
     );
     expect(bucket).toBeDefined();
     expect(bucket).toMatchObject({ allocatedMinutes: 480, capacityMinutes: 240 });
@@ -107,10 +110,14 @@ describe('Abwesenheiten + Ressourcen-Arbeitszeiten', () => {
       expect.objectContaining({ resourceId, startDate: '2026-10-05', endDate: '2026-10-05' }),
     ]);
 
-    // Abwesenheitstag: Kapazität 0, Belegung bleibt sichtbar.
-    const bucket = (gantt.body.utilization.buckets as Array<Record<string, unknown>>).find(
-      (entry) =>
-        entry.resourceId === resourceId && entry.start === '2026-10-05T08:00:00.000Z',
+    // Abwesenheitstag: Kapazität 0, Belegung bleibt sichtbar (separater Auslastungs-Endpoint).
+    const utilisation = await adminAgent
+      .get(
+        `/api/v1/projects/${projectId}/utilisation?from=2026-10-05T00:00:00.000Z&to=2026-10-06T00:00:00.000Z&bucketMinutes=1440`,
+      )
+      .expect(200);
+    const bucket = (utilisation.body.buckets as Array<Record<string, unknown>>).find(
+      (entry) => entry.resourceId === resourceId,
     );
     expect(bucket).toMatchObject({ allocatedMinutes: 480, capacityMinutes: 0 });
   });

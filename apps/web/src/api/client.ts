@@ -67,6 +67,46 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return handleResponse<T>(response);
 }
 
+export interface ConditionalResult<T> {
+  notModified: boolean;
+  data?: T;
+  etag?: string;
+}
+
+/**
+ * GET mit ETag: Sendet `If-None-Match` und behandelt 304 als „unverändert“,
+ * damit unveränderte Schedule-Payloads nicht erneut übertragen werden.
+ */
+async function requestConditional<T>(
+  path: string,
+  etag: string | null,
+): Promise<ConditionalResult<T>> {
+  const init: RequestInit = etag ? { headers: { 'If-None-Match': etag } } : {};
+  let response = await doFetch(path, init);
+
+  if (response.status === 401) {
+    if (await tryRefresh()) {
+      window.dispatchEvent(new Event('pp:auth-refreshed'));
+      response = await doFetch(path, init);
+    } else {
+      window.dispatchEvent(new Event('pp:auth-expired'));
+      window.location.assign('/login');
+      throw new ApiClientError(401, null);
+    }
+  }
+
+  if (response.status === 304) {
+    return { notModified: true, etag: etag ?? undefined };
+  }
+
+  const data = await handleResponse<T>(response);
+  return {
+    notModified: false,
+    data,
+    etag: response.headers.get('etag') ?? undefined,
+  };
+}
+
 export interface RequestOptions {
   /** Optimistic-Locking-Version → If-Match-Header. */
   version?: number;
@@ -74,6 +114,7 @@ export interface RequestOptions {
 
 export const api = {
   get: <T>(path: string) => request<T>(path),
+  getConditional: <T>(path: string, etag: string | null) => requestConditional<T>(path, etag),
   post: <T>(path: string, body?: unknown, options?: RequestOptions) =>
     request<T>(path, {
       method: 'POST',

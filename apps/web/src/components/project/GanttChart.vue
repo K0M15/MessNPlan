@@ -5,7 +5,7 @@ import { ABSENCE_TYPE_LABELS, type AbsenceType } from '@projectplaner/shared';
 import { useProjectStore } from '@/stores/project';
 import { useToasts } from '@/composables/useToasts';
 import { formatDateTime } from '@/utils/datetime';
-import type { ScheduleTaskDto, TaskDto } from '@/types';
+import type { ScheduleBarDto, TaskDto } from '@/types';
 
 const store = useProjectStore();
 const toasts = useToasts();
@@ -14,7 +14,9 @@ const ROW_H = 28;
 const RES_ROW_H = 36;
 const SECTION_H = 26;
 const MIN_PX_PER_MINUTE = 0.0004;
-const MAX_PX_PER_MINUTE = 4;
+// Cap: 5-Jahres-Achse bei max. Zoom bleibt unter ~4 Mio. px (Browser-Scrolllimits).
+const MAX_PX_PER_MINUTE = 1.5;
+const DAY_MS = 86_400_000;
 
 type Row =
   | { kind: 'section'; key: string; label: string; height: number }
@@ -22,7 +24,7 @@ type Row =
       kind: 'task';
       key: string;
       task: TaskDto;
-      sched: ScheduleTaskDto | undefined;
+      sched: ScheduleBarDto | undefined;
       depth: number;
       height: number;
     }
@@ -99,10 +101,10 @@ const taskRowIndex = computed(() => {
   return map;
 });
 
-/** Auslastungs-Buckets nach Ressource gruppiert (statt bei jedem Render). */
+/** Auslastungs-Buckets nach Ressource gruppiert (separater, zoomabhängiger Endpoint). */
 const bucketsByResource = computed(() => {
   const map = new Map<number, Array<{ start: number; allocated: number; capacity: number }>>();
-  for (const bucket of store.schedule?.utilization.buckets ?? []) {
+  for (const bucket of store.utilisation?.buckets ?? []) {
     const list = map.get(bucket.resourceId) ?? [];
     list.push({
       start: new Date(bucket.start).getTime(),
@@ -161,27 +163,89 @@ const totalHeight = computed(() => rowTops.value.total);
 
 // ---- Zeitraum & Zoom ------------------------------------------------------
 
-const range = computed(() => {
-  const starts: number[] = [];
-  const ends: number[] = [];
-  for (const task of store.schedule?.tasks ?? []) {
-    if (task.plannedStart) starts.push(new Date(task.plannedStart).getTime());
-    if (task.plannedEnd) ends.push(new Date(task.plannedEnd).getTime());
+/**
+ * Fixe Achse (Variante A): Referenz ist der Projektanker; früher geplante
+ * Aufgaben erweitern nur nach links. Das Ende reicht mindestens 5 Jahre in
+ * die Zukunft. Während einer geöffneten Projektansicht wächst die Achse nur,
+ * sie schrumpft nicht (kein Ruckeln beim Bearbeiten).
+ */
+function computeStaticRange(): { from: number; to: number } {
+  const timezone = store.schedule?.project.timezone ?? 'Europe/Berlin';
+  const anchorIso = store.schedule?.project.scheduleAnchor;
+  const anchor = anchorIso
+    ? DateTime.fromISO(anchorIso, { zone: timezone }).startOf('day')
+    : DateTime.now().setZone(timezone).startOf('day');
+
+  let minStart = anchor.toMillis();
+  let maxEnd = anchor.toMillis();
+  for (const task of store.flatTasks) {
+    if (task.plannedStart) minStart = Math.min(minStart, new Date(task.plannedStart).getTime());
+    if (task.plannedEnd) maxEnd = Math.max(maxEnd, new Date(task.plannedEnd).getTime());
   }
-  if (starts.length === 0) {
-    const now = Date.now();
-    starts.push(now - 7 * 86_400_000);
-    ends.push(now + 14 * 86_400_000);
+
+  return {
+    from: Math.min(anchor.toMillis(), minStart) - 2 * DAY_MS,
+    to: Math.max(anchor.plus({ years: 5 }).toMillis(), maxEnd + 30 * DAY_MS),
+  };
+}
+
+const range = ref({ from: Date.now() - 7 * DAY_MS, to: Date.now() + 30 * DAY_MS });
+let rangeProjectId: number | null = null;
+
+function ensureRange(): void {
+  const next = computeStaticRange();
+  if (rangeProjectId !== store.projectId) {
+    rangeProjectId = store.projectId;
+    range.value = next;
+    return;
   }
-  const from = Math.min(...starts) - 86_400_000;
-  const to = Math.max(...ends) + 86_400_000;
-  return { from, to };
-});
+  range.value = {
+    from: Math.min(range.value.from, next.from),
+    to: Math.max(range.value.to, next.to),
+  };
+}
 
 const pxPerMinute = ref(0.1);
 const timelineWidth = computed(() =>
   Math.max(120, Math.round(((range.value.to - range.value.from) / 60_000) * pxPerMinute.value)),
 );
+
+function bucketMinutesForSpan(): number {
+  const days = (range.value.to - range.value.from) / DAY_MS;
+  if (days <= 2) return 60;
+  if (days <= 14) return 240;
+  if (days <= 120) return 1440;
+  if (days <= 800) return 10_080;
+  return 43_200;
+}
+
+let utilisationTimer: number | undefined;
+function scheduleUtilisationLoad(): void {
+  window.clearTimeout(utilisationTimer);
+  utilisationTimer = window.setTimeout(() => {
+    void store
+      .refreshUtilisation({
+        from: new Date(range.value.from).toISOString(),
+        to: new Date(range.value.to).toISOString(),
+        bucketMinutes: bucketMinutesForSpan(),
+      })
+      .catch(() => undefined);
+  }, 350);
+}
+
+function scrollToMs(ms: number): void {
+  const target = ((ms - range.value.from) / 60_000) * pxPerMinute.value - viewportW.value / 2;
+  rightScroll.value?.scrollTo({ left: Math.max(0, target), top: rightScroll.value.scrollTop });
+}
+
+function scrollToAnchor(): void {
+  const timezone = store.schedule?.project.timezone ?? 'Europe/Berlin';
+  const anchorIso = store.schedule?.project.scheduleAnchor;
+  const anchor = anchorIso
+    ? DateTime.fromISO(anchorIso, { zone: timezone }).startOf('day').toMillis()
+    : range.value.from;
+  scrollToMs(anchor);
+}
 
 function setZoom(preset: 'hour' | 'day' | 'week' | 'month' | 'fit'): void {
   const presets: Record<string, number> = {
@@ -407,19 +471,43 @@ function mouseToLocal(event: MouseEvent): { x: number; y: number } {
   return { x: event.clientX - rect.left, y: event.clientY - rect.top };
 }
 
+interface PanState {
+  startX: number;
+  startY: number;
+  scrollLeft: number;
+  scrollTop: number;
+}
+
+/** Laufender Pan (mittlere Maustaste) – verschiebt die Zeitachse in x und y. */
+let panning: PanState | null = null;
+
 function onMouseDown(event: MouseEvent): void {
+  // Mittlere Maustaste: Pan, hat Vorrang vor dem Balken-Drag.
+  if (event.button === 1) {
+    event.preventDefault();
+    const scroller = rightScroll.value;
+    panning = {
+      startX: event.clientX,
+      startY: event.clientY,
+      scrollLeft: scroller?.scrollLeft ?? 0,
+      scrollTop: scroller?.scrollTop ?? 0,
+    };
+    if (canvasBody.value) canvasBody.value.style.cursor = 'grabbing';
+    return;
+  }
+  if (event.button !== 0) return;
+
   const { x, y } = mouseToLocal(event);
   const hit = hitTest(x, y);
   if (hit && store.canWrite) {
     const task = store.taskById.get(hit.bar.taskId);
-    const sched = store.schedule?.tasks.find((t) => t.id === hit.bar.taskId);
-    if (!task || !sched?.plannedStart || !sched.plannedEnd) return;
+    if (!task?.plannedStart || !task.plannedEnd) return;
     drag.value = {
       taskId: hit.bar.taskId,
       mode: hit.mode,
       startX: event.clientX,
-      origStartMs: new Date(sched.plannedStart).getTime(),
-      origEndMs: new Date(sched.plannedEnd).getTime(),
+      origStartMs: new Date(task.plannedStart).getTime(),
+      origEndMs: new Date(task.plannedEnd).getTime(),
       deltaMinutes: 0,
       moved: false,
     };
@@ -430,6 +518,16 @@ function onMouseDown(event: MouseEvent): void {
 function onMouseMove(event: MouseEvent): void {
   const canvas = canvasBody.value;
   if (!canvas) return;
+
+  if (panning) {
+    const scroller = rightScroll.value;
+    if (scroller) {
+      scroller.scrollLeft = panning.scrollLeft - (event.clientX - panning.startX);
+      scroller.scrollTop = panning.scrollTop - (event.clientY - panning.startY);
+    }
+    return;
+  }
+
   const { x, y } = mouseToLocal(event);
 
   if (drag.value) {
@@ -464,32 +562,58 @@ async function commitDrag(): Promise<void> {
     return;
   }
 
+  const timezone = store.schedule?.project.timezone ?? 'Europe/Berlin';
+
   if (state.mode === 'move') {
     const newStart = new Date(state.origStartMs + state.deltaMinutes * 60_000);
-    const ok = await store.updateTask(state.taskId, {
-      constraintType: 'start_no_earlier_than',
-      constraintDate: newStart.toISOString(),
-    });
+    const newEnd = new Date(state.origEndMs + state.deltaMinutes * 60_000);
+    // Sofort lokal verschieben; der Server-Plan folgt per Broadcast (schedule:updated).
+    const ok = await store.updateTask(
+      state.taskId,
+      { constraintType: 'start_no_earlier_than', constraintDate: newStart.toISOString() },
+      {
+        optimistic: {
+          plannedStart: newStart.toISOString(),
+          plannedEnd: newEnd.toISOString(),
+          constraintType: 'start_no_earlier_than',
+          constraintDate: newStart.toISOString(),
+        },
+      },
+    );
     if (ok) {
       toasts.success(
         'Aufgabe gepinnt (nicht früher als ' +
-          formatDateTime(
-            newStart.toISOString(),
-            store.schedule?.project.timezone ?? 'Europe/Berlin',
-          ) +
+          formatDateTime(newStart.toISOString(), timezone) +
           ')',
       );
     }
   } else {
     const durationMs = state.origEndMs - state.origStartMs;
-    const newDurationMinutes = Math.max(15, Math.round((durationMs / 60_000 + state.deltaMinutes) / 15) * 15);
-    const ok = await store.updateTask(state.taskId, { estimatedMinutes: newDurationMinutes });
+    const newDurationMinutes = Math.max(
+      15,
+      Math.round((durationMs / 60_000 + state.deltaMinutes) / 15) * 15,
+    );
+    const newEnd = new Date(state.origStartMs + newDurationMinutes * 60_000);
+    const ok = await store.updateTask(
+      state.taskId,
+      { estimatedMinutes: newDurationMinutes },
+      {
+        optimistic: {
+          estimatedMinutes: newDurationMinutes,
+          plannedEnd: newEnd.toISOString(),
+        },
+      },
+    );
     if (ok) toasts.success('Dauer angepasst');
   }
   queueRender();
 }
 
 function onMouseUp(): void {
+  if (panning) {
+    panning = null;
+    if (canvasBody.value) canvasBody.value.style.cursor = 'default';
+  }
   if (drag.value) {
     void commitDrag();
   }
@@ -497,6 +621,8 @@ function onMouseUp(): void {
 
 function onMouseLeave(): void {
   hoverRow.value = null;
+  // Während eines Pans laufen Mausereignisse über die Fenster-Handler weiter.
+  if (panning) return;
   if (drag.value) void commitDrag();
   queueRender();
 }
@@ -639,14 +765,14 @@ function renderBody(): void {
     return positions[index]! - scrollTop.value + ROW_H / 2;
   };
 
-  // Abhängigkeitspfeile
+  // Abhängigkeitspfeile (Zeiten kommen aus den Task-Stammdaten)
   ctx.strokeStyle = 'rgba(100, 116, 139, 0.7)';
   ctx.fillStyle = 'rgba(100, 116, 139, 0.9)';
   ctx.lineWidth = 1;
-  const scheduleById = schedById.value;
+  const taskById = store.taskById;
   for (const edge of store.schedule?.edges ?? []) {
-    const pred = scheduleById.get(edge.predecessorId);
-    const succ = scheduleById.get(edge.successorId);
+    const pred = taskById.get(edge.predecessorId);
+    const succ = taskById.get(edge.successorId);
     if (!pred?.plannedEnd || !succ?.plannedStart) continue;
     const y1Raw = taskRowY(edge.predecessorId);
     const y2Raw = taskRowY(edge.successorId);
@@ -670,17 +796,17 @@ function renderBody(): void {
     ctx.fill();
   }
 
-  // Aufgaben-Balken (nur sichtbarer Bereich)
+  // Aufgaben-Balken (nur sichtbarer Bereich; Zeiten aus den Task-Stammdaten)
   barRects = [];
   for (let i = start; i < end; i++) {
     const row = rows.value[i]!;
     if (row.kind !== 'task') continue;
-    const sched = row.sched;
-    if (!sched?.plannedStart || !sched.plannedEnd) continue;
+    const { task } = row;
+    if (!task.plannedStart || !task.plannedEnd) continue;
 
     const rowY = positions[i]! - scrollTop.value;
-    let startMs = new Date(sched.plannedStart).getTime();
-    let endMs = new Date(sched.plannedEnd).getTime();
+    let startMs = new Date(task.plannedStart).getTime();
+    let endMs = new Date(task.plannedEnd).getTime();
 
     const isDragged = drag.value?.taskId === row.task.id;
     if (isDragged && drag.value) {
@@ -717,7 +843,7 @@ function renderBody(): void {
       ctx.lineTo(cx - 8, cy);
       ctx.closePath();
       ctx.fill();
-      if (sched.critical) {
+      if (row.sched?.critical) {
         ctx.strokeStyle = '#dc2626';
         ctx.lineWidth = 1.5;
         ctx.stroke();
@@ -733,8 +859,8 @@ function renderBody(): void {
         roundRect(ctx, x, y, (width * row.task.progress) / 100, barH, 3);
         ctx.fill();
       }
-      ctx.strokeStyle = sched.critical ? '#dc2626' : `${color}`;
-      ctx.lineWidth = sched.critical ? 1.5 : 1;
+      ctx.strokeStyle = row.sched?.critical ? '#dc2626' : `${color}`;
+      ctx.lineWidth = row.sched?.critical ? 1.5 : 1;
       roundRect(ctx, x + 0.5, y + 0.5, width - 1, barH - 1, 3);
       ctx.stroke();
       barRects.push({ taskId: row.task.id, x, y, w: width, h: barH });
@@ -804,7 +930,7 @@ function renderBody(): void {
     }
 
     const buckets = bucketsByResource.value.get(row.resourceId) ?? [];
-    const bucketMs = (store.schedule?.utilization.bucketMinutes ?? 1440) * 60_000;
+    const bucketMs = (store.utilisation?.bucketMinutes ?? 1440) * 60_000;
 
     for (const bucket of buckets) {
       const x = timeToX(bucket.start);
@@ -873,8 +999,10 @@ function ensureFit(): void {
 }
 
 onMounted(() => {
+  ensureRange();
   measure();
   ensureFit();
+  scheduleUtilisationLoad();
   queueRender();
   window.addEventListener('mousemove', onMouseMove);
   window.addEventListener('mouseup', onMouseUp);
@@ -890,16 +1018,27 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.removeEventListener('mousemove', onMouseMove);
   window.removeEventListener('mouseup', onMouseUp);
+  window.clearTimeout(utilisationTimer);
   resizeObserver?.disconnect();
 });
 
 watch(
   () => store.schedule,
+  () => {
+    ensureRange();
+    queueRender();
+  },
+);
+watch(
+  () => [store.utilisation, store.selectedTaskId, store.expandedIds, rows.value.length, store.presenceSelections],
   () => queueRender(),
 );
 watch(
-  () => [store.selectedTaskId, store.expandedIds, rows.value.length, store.presenceSelections],
-  () => queueRender(),
+  () => [range.value.from, range.value.to, pxPerMinute.value] as const,
+  () => {
+    scheduleUtilisationLoad();
+    queueRender();
+  },
 );
 
 // ---- Fremd-Auswahl (Presence) --------------------------------------------
@@ -982,7 +1121,12 @@ const legend = [
       <button type="button" class="rounded-md border border-slate-200 px-2 py-1 hover:bg-slate-50" @click="setZoom('week')">Wochen</button>
       <button type="button" class="rounded-md border border-slate-200 px-2 py-1 hover:bg-slate-50" @click="setZoom('month')">Monate</button>
       <button type="button" class="rounded-md border border-slate-200 px-2 py-1 hover:bg-slate-50" @click="setZoom('fit')">Alles</button>
-      <span class="ml-2 hidden text-slate-400 lg:inline">Strg+Mausrad = Zoomen · Balken ziehen = pinnen · rechte Kante = Dauer</span>
+      <span class="mx-1 h-4 w-px bg-slate-200" />
+      <button type="button" class="rounded-md border border-slate-200 px-2 py-1 hover:bg-slate-50" @click="scrollToAnchor()">Zum Anker</button>
+      <button type="button" class="rounded-md border border-slate-200 px-2 py-1 hover:bg-slate-50" @click="scrollToMs(Date.now())">Heute</button>
+      <span class="ml-2 hidden text-slate-400 lg:inline">
+        Strg+Mausrad = Zoom · mittlere Maustaste = verschieben · Balken ziehen = pinnen · rechte Kante = Dauer
+      </span>
       <span class="ml-auto hidden items-center gap-3 md:flex">
         <span
           v-for="mark in selectionLegend"
@@ -1072,6 +1216,7 @@ const legend = [
             @mousemove="onMouseMove"
             @mouseleave="onMouseLeave"
             @wheel="onWheel"
+            @auxclick.prevent
           />
         </div>
       </div>

@@ -41,6 +41,9 @@ const envSchema = z
   ACCESS_TOKEN_TTL: z.coerce.number().int().positive().default(900),
   REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().positive().default(30),
   COOKIE_SECURE: boolFromEnv(false),
+  /** Optionale Overrides für E2E-/Lasttests (Default: Dev 100/400, Prod 20/120). */
+  LOGIN_RATE_LIMIT: z.coerce.number().int().positive().optional(),
+  REFRESH_RATE_LIMIT: z.coerce.number().int().positive().optional(),
 
   APP_ENCRYPTION_KEY: z.string().optional(),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
