@@ -142,10 +142,19 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
+        set -euo pipefail
         while true; do
           ts=$$(date -u +%Y%m%d-%H%M%S)
+          tmp="/backups/.tmp-$${MYSQL_DATABASE}-$${ts}.sql.gz"
+          target="/backups/$${MYSQL_DATABASE}-$${ts}.sql.gz"
           echo "[backup] dump $$MYSQL_DATABASE at $$ts"
-          mysqldump -h db -u "$$MYSQL_USER" --single-transaction --routines --triggers "$$MYSQL_DATABASE" | gzip > "/backups/$${MYSQL_DATABASE}-$${ts}.sql.gz"
+          if mysqldump -h db -u "$$MYSQL_USER" --single-transaction --routines --triggers "$$MYSQL_DATABASE" | gzip > "$$tmp" && gzip -t "$$tmp"; then
+            mv "$$tmp" "$$target"
+            echo "[backup] ok: $$target"
+          else
+            rm -f "$$tmp"
+            echo "[backup] FEHLGESCHLAGEN – kein Backup geschrieben" >&2
+          fi
           find /backups -name '*.sql.gz' -mtime +14 -delete
           sleep 86400
         done

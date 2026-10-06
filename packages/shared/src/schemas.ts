@@ -16,7 +16,7 @@ import {
   WEEKDAY_KEYS,
 } from './constants.js';
 
-export const idSchema = z.coerce.number().int().positive();
+export const idSchema = z.coerce.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 
 const timeSchema = z
   .string()
@@ -226,7 +226,9 @@ export const resourceCreateSchema = z.object({
   isActive: z.boolean().default(true),
 });
 
-export const resourceUpdateSchema = resourceCreateSchema.partial();
+export const resourceUpdateSchema = resourceCreateSchema
+  .partial()
+  .refine((v) => Object.keys(v).length > 0, 'Mindestens ein Feld angeben');
 
 /**
  * Abwesenheit einer Ressource. `resourceId` kommt aus der Route.

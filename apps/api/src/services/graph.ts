@@ -65,6 +65,8 @@ export async function exchangeCodeForTokens(
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
+    // Ohne Timeout könnte der Worker an einer hängenden Graph-Antwort blockieren.
+    signal: AbortSignal.timeout(30_000),
   });
   if (!response.ok) {
     throw new Error(`Token-Austausch fehlgeschlagen (${response.status}): ${await response.text()}`);
@@ -93,6 +95,8 @@ export async function refreshTokens(refreshToken: string): Promise<GraphTokens> 
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
+    // Ohne Timeout könnte der Worker an einer hängenden Graph-Antwort blockieren.
+    signal: AbortSignal.timeout(30_000),
   });
   if (!response.ok) {
     throw new Error(`Token-Refresh fehlgeschlagen (${response.status}): ${await response.text()}`);
@@ -119,6 +123,7 @@ async function graphRequest<T>(
       ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
     },
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    signal: AbortSignal.timeout(30_000),
   });
   if (response.status === 404 && method !== 'GET') return null;
   if (!response.ok) {

@@ -252,6 +252,25 @@ describe('Signierte externe Requests', () => {
     ).expect(403);
     expect(res.body.type).toBe('urn:projectplaner:forbidden');
   });
+
+  it('lehnt exakt dieselbe Signatur beim zweiten Mal ab (Replay-Schutz)', async () => {
+    const url = `/api/v1/external/projects/${projectId}/tasks`;
+    const body = { name: 'Einmalig', estimatedMinutes: 30 };
+    const timestamp = Math.floor(Date.now() / 1000);
+
+    await externalPost(app, url, body, {
+      keyId: apiKey.id,
+      privateKey: key.privateKey,
+      timestamp,
+    }).expect(201);
+
+    const replay = await externalPost(app, url, body, {
+      keyId: apiKey.id,
+      privateKey: key.privateKey,
+      timestamp,
+    }).expect(401);
+    expect(replay.body.detail).toContain('Replay');
+  });
 });
 
 describe('Externe Abhängigkeiten und Zuteilungen', () => {
@@ -301,16 +320,20 @@ describe('Externe Abhängigkeiten und Zuteilungen', () => {
     const resourceId = resourceRes.body.resource.id;
 
     const url = `/api/v1/external/projects/${projectId}/tasks/${taskId}/assignments`;
+    const baseTimestamp = Math.floor(Date.now() / 1000);
     const created = await externalPost(app, url, { resourceId, allocationPercent: 50 }, {
       keyId: apiKey.id,
       privateKey: key.privateKey,
+      timestamp: baseTimestamp,
     }).expect(201);
     expect(created.body.assignment.resourceId).toBe(resourceId);
     expect(created.body.assignment.allocationPercent).toBe(50);
 
+    // Gleicher Body, aber neuer Timestamp/Signatur – der Replay-Schutz darf hier nicht greifen.
     await externalPost(app, url, { resourceId, allocationPercent: 50 }, {
       keyId: apiKey.id,
       privateKey: key.privateKey,
+      timestamp: baseTimestamp + 1,
     }).expect(409);
   });
 });

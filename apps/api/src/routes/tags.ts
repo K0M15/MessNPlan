@@ -103,13 +103,15 @@ export function tagRoutes(): Router {
     const id = parseId(req.params.id);
     const { task } = await ensureTaskAccess(id, req.user!, 'member');
     const input = parse(taskTagsSchema, req.body);
+    // Duplikate entfernen, sonst meldet der Längenvergleich unten fälschlich "Unbekannte Tag-ID".
+    const uniqueTagIds = [...new Set(input.tagIds)];
 
-    if (input.tagIds.length > 0) {
+    if (uniqueTagIds.length > 0) {
       const rows = await db
         .select({ id: tags.id, projectId: tags.projectId })
         .from(tags)
-        .where(inArray(tags.id, input.tagIds));
-      if (rows.length !== input.tagIds.length) throw badRequest('Unbekannte Tag-ID');
+        .where(inArray(tags.id, uniqueTagIds));
+      if (rows.length !== uniqueTagIds.length) throw badRequest('Unbekannte Tag-ID');
       if (rows.some((t) => t.projectId !== task.projectId)) {
         throw badRequest('Tags gehören zu einem anderen Projekt');
       }
@@ -117,8 +119,8 @@ export function tagRoutes(): Router {
 
     await db.transaction(async (tx) => {
       await tx.delete(taskTags).where(eq(taskTags.taskId, id));
-      if (input.tagIds.length > 0) {
-        await tx.insert(taskTags).values(input.tagIds.map((tagId) => ({ taskId: id, tagId })));
+      if (uniqueTagIds.length > 0) {
+        await tx.insert(taskTags).values(uniqueTagIds.map((tagId) => ({ taskId: id, tagId })));
       }
     });
 

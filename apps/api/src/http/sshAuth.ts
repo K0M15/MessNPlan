@@ -255,6 +255,33 @@ export interface SshAuthInput {
  * internen Verify-Endpunkt (`POST /internal/verify-ssh`) genutzt, damit die
  * Prüflogik exakt einmal existiert.
  */
+/** Cache bereits verwendeter Signaturen (Key+Timestamp+Signatur) für den Replay-Schutz. */
+const REPLAY_CACHE_MAX = 10_000;
+const usedSignatures = new Map<string, number>();
+
+function isReplay(keyId: number, timestamp: string, signature: string): boolean {
+  const now = Date.now();
+  if (usedSignatures.size > 0) {
+    for (const [hash, expiresAt] of usedSignatures) {
+      if (expiresAt <= now) usedSignatures.delete(hash);
+      else break; // Insertion-Order: spätere Einträge laufen ebenfalls später ab
+    }
+  }
+  while (usedSignatures.size >= REPLAY_CACHE_MAX) {
+    const oldest = usedSignatures.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    usedSignatures.delete(oldest);
+  }
+
+  const replayHash = sha256Hex(Buffer.from(`${keyId}:${timestamp}:${signature}`, 'utf8'));
+  if (usedSignatures.has(replayHash)) return true;
+  usedSignatures.set(
+    replayHash,
+    (Number(timestamp) + SSH_TIMESTAMP_TOLERANCE_SECONDS) * 1000,
+  );
+  return false;
+}
+
 export async function authenticateSshRequest(input: SshAuthInput): Promise<ApiKeyContext> {
   const keyIdRaw = input.keyId;
   const timestampRaw = input.timestamp;
@@ -306,6 +333,12 @@ export async function authenticateSshRequest(input: SshAuthInput): Promise<ApiKe
   });
   if (!verifySshSignature(parsedKey, Buffer.from(canonical, 'utf8'), signature)) {
     throw unauthorized('Signatur ungültig');
+  }
+
+  // Replay-Schutz: exakt dieselbe Signatur (Key+Timestamp+Signatur) darf nur
+  // einmal verwendet werden – innerhalb des Toleranzfensters gecacht.
+  if (isReplay(key.id, timestampRaw, signatureRaw)) {
+    throw unauthorized('Signatur wurde bereits verwendet (Replay)');
   }
 
   const context: ApiKeyContext = { id: key.id, projectId: key.projectId, name: key.name };

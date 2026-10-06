@@ -13,7 +13,7 @@ import { badRequest, conflict } from '../errors.js';
 import { requireAuth } from '../http/auth.js';
 import { parse, parseId, parseIfMatch } from '../http/parse.js';
 import { broadcastToProject } from '../realtime.js';
-import { ensureProjectAccess, ensureProjectWrite, ensureTaskAccess } from '../services/access.js';
+import { ensureProjectAccess, ensureProjectWrite, ensureTaskAccess, getProjectRole } from '../services/access.js';
 import { writeAudit } from '../services/audit.js';
 import { enqueueJob } from '../services/outbox.js';
 
@@ -225,6 +225,7 @@ export function taskRoutes(): Router {
   router.get('/tasks/:id', async (req, res) => {
     const id = parseId(req.params.id);
     const { task, project } = await ensureTaskAccess(id, req.user!);
+    const myRole = await getProjectRole(project.id, req.user!);
 
     const [tagRows, assignmentRows] = await Promise.all([
       db
@@ -250,7 +251,7 @@ export function taskRoutes(): Router {
 
     res.json({
       task: { ...task, tags: tagRows, assignments: assignmentRows },
-      project: { id: project.id, name: project.name, myRole: null },
+      project: { id: project.id, name: project.name, myRole },
     });
   });
 

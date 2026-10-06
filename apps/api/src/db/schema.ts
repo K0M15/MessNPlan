@@ -58,6 +58,8 @@ export const refreshTokens = mysqlTable(
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
     tokenHash: varchar('token_hash', { length: 64 }).notNull(),
+    /** Hash des Nachfolge-Tokens (nur bei Rotation gesetzt) – Grundlage des Retry-Grace-Fensters. */
+    replacedByHash: varchar('replaced_by_hash', { length: 64 }),
     expiresAt: datetime('expires_at', { mode: 'date', fsp: 3 }).notNull(),
     revokedAt: datetime('revoked_at', { mode: 'date', fsp: 3 }),
     ip: varchar('ip', { length: 45 }),
@@ -107,7 +109,10 @@ export const holidays = mysqlTable(
     name: varchar('name', { length: 160 }).notNull(),
     createdAt: createdAt(),
   },
-  (t) => [index('holidays_project_date_idx').on(t.projectId, t.date)],
+  (t) => [
+    uniqueIndex('holidays_project_date_uq').on(t.projectId, t.date),
+    index('holidays_project_date_idx').on(t.projectId, t.date),
+  ],
 );
 
 export const projectMembers = mysqlTable(

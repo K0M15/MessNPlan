@@ -175,6 +175,19 @@ Feature-Wellen (2026-10-05, je eigener Feature-Branch mit Review + Merge nach `m
 - **Ressourcen-Verfügbarkeit** (`feature/resource-availability`): Wochentags-Arbeitszeiten je Ressource + personenbezogene Abwesenheiten (`absences`, Migration 0003), Ressourcen-Kalender für Kapazität/Auslastung/Health/Gantt; der Projektkalender steuert weiterhin die Aufgaben-Terminierung.
 - **Container-DB-Zugriff** auf `DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME` umgestellt (Compose setzt sie), `DATABASE_URL` bleibt Host-Fallback – Passwörter mit Sonderzeichen brauchen so kein URL-Encoding (behebt `ERR_INVALID_URL` beim `migrate`-Service).
 
+Review-Fixes (2026-10-06, Findings aus dem Code-Review):
+- **Token-Leak in Logs behoben**: `res.headers["set-cookie"]` redigiert (+ Regressionstest `logger.test.ts`).
+- **Socket-Rejoin**: `project:join`/Presence werden bei jedem (Re-)Connect erneut gesendet (Store-Test).
+- **DST-Korrektheit**: materialisierte Kalenderfenster in Minuten mit Wall-Clock-Berechnung; Ressourcen-Kalender analog (siehe `fix/calendar-dst`).
+- **Refresh-Grace 30 s** nur für rotierte Tokens (`refresh_tokens.replaced_by_hash`, Migration 0005).
+- **Holidays-Unique-Index** (`holidays_project_date_uq`, Migration 0004) inkl. Dedupe.
+- **MCP-Sessions an API-Key/Projekt gebunden** + Rate-Limit/Idle-Timeout (`fix/mcp-hardening`).
+- **Worker-Maintenance**: Outbox (14 Tage) und Audit-Log (180 Tage) werden gepruned.
+- **Graph-Aufrufe** mit 30-s-Timeout; **verify-ssh** mit eigenem 8-MB-Body-Parser (MCP bis 4 MiB).
+- **Schedule-Lock** (`GET_LOCK`) gegen konkurrierende Berechnungen.
+- **Externe API**: Pre-Auth-IP-Limit + Replay-Cache; Doku in `docs/API-external.md` aktualisiert.
+- **Backup-Service** mit `pipefail`/Temp-Datei/`gzip -t`; **CSP** auf `connect-src 'self'`; diverse Nits (myRole, Tag-Dedupe, Admin-Race via Row-Locks, clearCookie, Schema-Refinements).
+
 ## 11. Nächste Schritte
 
 1. **Outlook gegen echten M365-Tenant**: Azure-App registrieren (Redirect `GRAPH_REDIRECT_URI`, delegated `Calendars.ReadWrite`, `offline_access`, `User.Read`), Verbindung testen; danach Inbound (Delta-Query) und Webhooks ergänzen.
@@ -209,6 +222,8 @@ Feature-Wellen (2026-10-05, je eigener Feature-Branch mit Review + Merge nach `m
 | 2026-10-05 | `TaskApi`-Interface mit REST-Session- und SSH-Client | Service-Login (lesen/schreiben) und externe API (nur anlegen) austauschbar |
 | 2026-10-05 | Parallel-Features in Git-Worktrees + Feature-Branches mit Subagenten | Keine Dateikonflikte, Review+Merge je Feature |
 | 2026-10-05 | Container-DB über `DB_*`-Variablen statt interpolierter `DATABASE_URL` | Sonderzeichen im Passwort, Compose kann nicht URL-encoden |
+| 2026-10-06 | Refresh-Grace-Fenster 30 s nur für **rotierte** Tokens (`replaced_by_hash`) | Multi-Tab/Retries ohne erzwungenen Logout; Logout/Admin-Widerruf bleiben sofort wirksam |
+| 2026-10-06 | Externe API: Replay-Cache identischer Signaturen + Pre-Auth-IP-Limit | Signatur-Diebstahl/Retries und unbegrenzte Verify-Kosten verhindern |
 
 ## 13. Bekannte Stolperfallen
 
@@ -231,3 +246,8 @@ Feature-Wellen (2026-10-05, je eigener Feature-Branch mit Review + Merge nach `m
 - **DB-Zugriff**: In Containern gewinnen `DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME` (Compose setzt sie); auf dem Host greift `DATABASE_URL` (dort URL-encodiert). Mindestens eines von beiden muss gesetzt sein (config validiert das).
 - **PWA-Service-Worker**: Bei selbstsignierten Zertifikaten (E2E gegen `https://localhost`) oder blockierten SW fängt `onRegisterError` in `main.ts` den Fehler ab – kein unhandled error, Test bleibt grün.
 - **ESLint ignoriert generierte Artefakte** (`**/playwright-report/**`, `**/test-results/**`); bei neuen Berichtsformaten die Ignore-Liste in `eslint.config.js` mitziehen.
+- **Log-Redaction:** `res.headers["set-cookie"]` ist in `logger.ts` redigiert (enthält `pp_at`/`pp_rt`). Neue Cookie-Namen oder sensible Header dort ergänzen; Regressionstest: `apps/api/src/logger.test.ts`.
+- **Refresh-Rotation:** Das 30-s-Grace-Fenster gilt nur für durch Rotation ersetzte Tokens (`replaced_by_hash`). Logout/Admin-Deaktivierung widerrufen sofort; Reuse außerhalb des Fensters widerruft die ganze Familie.
+- **Parallele Planberechnung:** `computeSchedule` serialisiert per MySQL-`GET_LOCK`; ein zweiter Aufruf erhält `503` „Planung läuft bereits" (manueller POST + Worker).
+- **Externe API:** Identische Signatur zweimal = `401` Replay; Clients signieren jeden Request mit frischem Timestamp. Pre-Auth-Limit 60/min pro IP (Dev 600).
+- **Backup-Service:** schreibt nur vollständige Dumps (Temp-Datei + `gzip -t` + `pipefail`); Fehlschläge landen als Klartext-Hinweis im Log statt als kaputte `.sql.gz`.

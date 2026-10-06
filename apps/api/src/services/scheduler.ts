@@ -1,8 +1,9 @@
 import { sql } from 'drizzle-orm';
 import type { DateTime } from 'luxon';
 import type { DependencyType } from '@projectplaner/shared';
-import { db } from '../db/client.js';
+import { db, pool } from '../db/client.js';
 import { assignments, tasks } from '../db/schema.js';
+import { ApiError } from '../errors.js';
 import { topologicalOrder, type DepEdge } from './dependencyGraph.js';
 import {
   loadPlanningData,
@@ -333,7 +334,36 @@ async function persistPlan(
   });
 }
 
+/**
+ * Serialisiert Berechnungen pro Projekt über einen MySQL-Named-Lock:
+ * manueller POST /schedule und Worker können sich so nicht gegenseitig
+ * mit veralteten Ständen überschreiben.
+ */
 export async function computeSchedule(projectId: number): Promise<ComputeScheduleResult> {
+  const lockName = `pp:schedule:${projectId}`;
+  const lockConnection = await pool.getConnection();
+  try {
+    const [lockRows] = await lockConnection.query('SELECT GET_LOCK(?, 10) AS locked', [lockName]);
+    const locked = (lockRows as Array<{ locked: number | null }>)[0]?.locked;
+    if (locked !== 1) {
+      throw new ApiError(
+        503,
+        'Planung läuft bereits',
+        'Für dieses Projekt wird gerade eine Neuberechnung durchgeführt. Bitte kurz warten.',
+      );
+    }
+
+    try {
+      return await computeScheduleLocked(projectId);
+    } finally {
+      await lockConnection.query('SELECT RELEASE_LOCK(?)', [lockName]);
+    }
+  } finally {
+    lockConnection.release();
+  }
+}
+
+async function computeScheduleLocked(projectId: number): Promise<ComputeScheduleResult> {
   const data = await loadPlanningData(projectId);
   const { planned, cyclic } = buildPlan({
     tasks: data.tasks,

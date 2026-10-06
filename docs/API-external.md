@@ -189,12 +189,15 @@ Fehler kommen als RFC 7807 (`application/problem+json`) mit `type`, `title`,
 
 - **Private Key schützen:** nur der öffentliche Schlüssel liegt auf dem Server.
   Private Keys wie Passwörter behandeln, nicht ins Repository committen.
-- **Replay-Fenster:** Signaturen sind nur ±300 s gültig. Uhren per NTP
-  synchron halten. Ein Replay innerhalb des Fensters ist theoretisch möglich –
-  Abhängigkeiten und Zuteilungen sind per Unique-Index geschützt, das
-  wiederholte Anlegen gleichnamiger Aufgaben ist es nicht. Clients sollten
-  daher Retries nur bei eindeutigen Fehlern (z. B. Verbindungsabbruch) und
-  kontrolliert wiederholen.
+- **Replay-Schutz (serverseitig):** Zusätzlich zum ±300-s-Fenster merkt sich der
+  Server jede bereits verwendete Signatur (Key + Timestamp + Signatur) für die
+  Dauer des Fensters. Eine exakt wiederholte Signatur wird mit `401`
+  („Signatur wurde bereits verwendet (Replay)“) abgelehnt. **Clients müssen
+  daher jeden Request neu signieren** (frischer Timestamp), auch bei Retries –
+  ein Netz-Retry mit unveränderten Headern schlägt fehl.
+- **Pre-Auth-Rate-Limit:** 60 Anfragen/Minute pro IP (Development: 600),
+  greift bereits **vor** der Signaturprüfung – auch ungültige Signaturen sind
+  damit begrenzt.
 - **Ablauf:** `expiresAt` setzen und Schlüssel regelmäßig rotieren: neuen
   Schlüssel anlegen, Client umstellen, alten Schlüssel deaktivieren
   (`isActive: false`) und danach löschen. Deaktivierung wirkt sofort.

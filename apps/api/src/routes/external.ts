@@ -1,4 +1,5 @@
 import { Router, type Request } from 'express';
+import rateLimit from 'express-rate-limit';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import {
   assignmentCreateSchema,
@@ -6,9 +7,10 @@ import {
   REALTIME_EVENTS,
   taskCreateSchema,
 } from '@projectplaner/shared';
+import { isDevelopment } from '../config.js';
 import { db } from '../db/client.js';
 import { assignments, resources, taskDependencies, tasks } from '../db/schema.js';
-import { badRequest, conflict, forbidden, notFound } from '../errors.js';
+import { badRequest, conflict, forbidden, notFound, tooManyRequests } from '../errors.js';
 import { apiKeyRateLimit, sshAuth } from '../http/sshAuth.js';
 import { parse, parseId } from '../http/parse.js';
 import { broadcastToProject } from '../realtime.js';
@@ -26,7 +28,19 @@ import { enqueueJob } from '../services/outbox.js';
  */
 export function externalRoutes(): Router {
   const router = Router();
-  router.use(sshAuth, apiKeyRateLimit);
+
+  // Limit VOR der Signaturprüfung: ungültige Signaturen kosten sonst pro Request
+  // einen DB-Lookup plus RSA-/Ed25519-Verifikation ohne Begrenzung.
+  const preAuthLimiter = rateLimit({
+    windowMs: 60_000,
+    limit: isDevelopment ? 600 : 60,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    handler: (_req, _res, next) =>
+      next(tooManyRequests('Zu viele externe Anfragen, bitte warten')),
+  });
+
+  router.use(preAuthLimiter, sshAuth, apiKeyRateLimit);
 
   /** Stellt sicher, dass der Schlüssel zum Projekt der URL gehört. */
   function ensureKeyProject(req: Request, projectId: number): void {

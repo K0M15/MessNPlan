@@ -117,19 +117,6 @@ export function userRoutes(): Router {
     const losesAdmin =
       existing.role === 'admin' &&
       ((input.role !== undefined && input.role !== 'admin') || input.isActive === false);
-    if (losesAdmin) {
-      const admins = await db
-        .select({ count: sql<number>`count(*)` })
-        .from(users)
-        .where(and(eq(users.role, 'admin'), eq(users.isActive, true)));
-      if (Number(admins[0]?.count ?? 0) <= 1) {
-        throw badRequest(
-          input.isActive === false
-            ? 'Der letzte aktive Administrator kann nicht deaktiviert werden'
-            : 'Der letzte aktive Administrator kann nicht herabgestuft werden',
-        );
-      }
-    }
 
     const updates: Partial<typeof users.$inferInsert> = {};
     if (input.email) updates.email = input.email;
@@ -138,7 +125,26 @@ export function userRoutes(): Router {
     if (input.isActive !== undefined) updates.isActive = input.isActive;
     if (input.password) updates.passwordHash = await hashPassword(input.password);
 
-    await db.update(users).set(updates).where(eq(users.id, id));
+    // Guard + Update in einer Transaktion mit Row-Locks: zwei gleichzeitige
+    // Herabstufungen können so nicht den letzten Admin entfernen.
+    await db.transaction(async (tx) => {
+      if (losesAdmin) {
+        const admins = await tx
+          .select({ id: users.id })
+          .from(users)
+          .where(and(eq(users.role, 'admin'), eq(users.isActive, true)))
+          .for('update');
+        const remaining = admins.filter((admin) => admin.id !== id);
+        if (remaining.length === 0) {
+          throw badRequest(
+            input.isActive === false
+              ? 'Der letzte aktive Administrator kann nicht deaktiviert werden'
+              : 'Der letzte aktive Administrator kann nicht herabgestuft werden',
+          );
+        }
+      }
+      await tx.update(users).set(updates).where(eq(users.id, id));
+    });
 
     if (input.isActive === false || input.password) {
       await db
@@ -165,17 +171,21 @@ export function userRoutes(): Router {
     const [existing] = await db.select().from(users).where(eq(users.id, id)).limit(1);
     if (!existing) throw notFound('Benutzer nicht gefunden');
 
-    if (existing.role === 'admin') {
-      const admins = await db
-        .select({ count: sql<number>`count(*)` })
-        .from(users)
-        .where(and(eq(users.role, 'admin'), eq(users.isActive, true)));
-      if (Number(admins[0]?.count ?? 0) <= 1) {
-        throw badRequest('Der letzte aktive Administrator kann nicht deaktiviert werden');
+    await db.transaction(async (tx) => {
+      if (existing.role === 'admin') {
+        const admins = await tx
+          .select({ id: users.id })
+          .from(users)
+          .where(and(eq(users.role, 'admin'), eq(users.isActive, true)))
+          .for('update');
+        const remaining = admins.filter((admin) => admin.id !== id);
+        if (remaining.length === 0) {
+          throw badRequest('Der letzte aktive Administrator kann nicht deaktiviert werden');
+        }
       }
-    }
+      await tx.update(users).set({ isActive: false }).where(eq(users.id, id));
+    });
 
-    await db.update(users).set({ isActive: false }).where(eq(users.id, id));
     await db
       .update(refreshTokens)
       .set({ revokedAt: new Date() })

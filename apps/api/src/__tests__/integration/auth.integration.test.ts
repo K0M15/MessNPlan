@@ -1,7 +1,8 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import request from 'supertest';
+import { sql } from 'drizzle-orm';
 import { createApp } from '../../app.js';
-import { closeDatabase } from '../../db/client.js';
+import { closeDatabase, db } from '../../db/client.js';
 import { cookieHeader, createUser, login, readAuthCookies } from './helpers.js';
 
 /**
@@ -76,16 +77,47 @@ describe('Auth-Flow', () => {
 });
 
 describe('Refresh-Reuse', () => {
-  it('widerruft beim zweiten Einsatz die gesamte Token-Familie', async () => {
+  it('behandelt Reuse im Grace-Fenster als Retry ohne Familien-Widerruf', async () => {
     const initial = await login(app, user);
 
-    // Erste Nutzung: Rotation und neuer Refresh-Token.
+    const rotated = await request(app)
+      .post('/api/v1/auth/refresh')
+      .set('Cookie', cookieHeader({ refresh: initial.refresh }))
+      .expect(200);
+    const next = readAuthCookies(rotated);
+
+    // Sofortiger zweiter Request mit dem alten Token (Multi-Tab-Race/Retry).
+    const retry = await request(app)
+      .post('/api/v1/auth/refresh')
+      .set('Cookie', cookieHeader({ refresh: initial.refresh }))
+      .expect(200);
+    const retryCookies = readAuthCookies(retry);
+    expect(retryCookies.refresh).not.toBe(initial.refresh);
+    expect(retryCookies.refresh).not.toBe(next.refresh);
+
+    // Der zuvor ausgegebene Token bleibt gültig (keine Familien-Widerrufung).
+    await request(app)
+      .post('/api/v1/auth/refresh')
+      .set('Cookie', cookieHeader({ refresh: next.refresh }))
+      .expect(200);
+  });
+
+  it('widerruft die gesamte Token-Familie bei echtem Reuse außerhalb des Fensters', async () => {
+    const initial = await login(app, user);
+
     const rotated = await request(app)
       .post('/api/v1/auth/refresh')
       .set('Cookie', cookieHeader({ refresh: initial.refresh }))
       .expect(200);
     const next = readAuthCookies(rotated);
     expect(next.refresh).not.toBe(initial.refresh);
+
+    // Grace-Fenster simulieren: Widerrufszeitpunkt künstlich altern.
+    await db.execute(sql`
+      UPDATE refresh_tokens
+      SET revoked_at = DATE_SUB(revoked_at, INTERVAL 60 SECOND)
+      WHERE user_id = ${user.id} AND revoked_at IS NOT NULL
+    `);
 
     // Reuse des alten Tokens → 401 und Familien-Widerruf.
     await request(app)

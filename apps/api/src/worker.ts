@@ -1,8 +1,8 @@
-import { and, asc, eq, isNotNull, lt, lte, or } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNotNull, lt, lte, or } from 'drizzle-orm';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { config } from './config.js';
 import { closeDatabase, db } from './db/client.js';
-import { outboxJobs, refreshTokens } from './db/schema.js';
+import { auditLog, outboxJobs, refreshTokens } from './db/schema.js';
 import { ApiError } from './errors.js';
 import { logger } from './logger.js';
 import { runOutlookSync } from './services/outlookSync.js';
@@ -149,11 +149,38 @@ async function pruneRefreshTokens(): Promise<void> {
   }
 }
 
+/** Abgeschlossene/endgültig fehlgeschlagene Outbox-Jobs nach 14 Tagen entfernen. */
+async function pruneOutboxJobs(): Promise<void> {
+  const [result] = await db
+    .delete(outboxJobs)
+    .where(
+      and(
+        inArray(outboxJobs.status, ['done', 'failed']),
+        lt(outboxJobs.updatedAt, new Date(Date.now() - 14 * 86_400_000)),
+      ),
+    );
+  if (result.affectedRows > 0) {
+    logger.info({ count: result.affectedRows }, 'Alte Outbox-Jobs gelöscht');
+  }
+}
+
+/** Audit-Log gemäß Aufbewahrungsrichtlinie (180 Tage) kürzen. */
+async function pruneAuditLog(): Promise<void> {
+  const [result] = await db
+    .delete(auditLog)
+    .where(lt(auditLog.createdAt, new Date(Date.now() - 180 * 86_400_000)));
+  if (result.affectedRows > 0) {
+    logger.info({ count: result.affectedRows }, 'Alte Audit-Einträge gelöscht');
+  }
+}
+
 async function maintenance(): Promise<void> {
   if (Date.now() - lastMaintenance < MAINTENANCE_INTERVAL_MS) return;
   lastMaintenance = Date.now();
   await recoverStaleJobs();
   await pruneRefreshTokens();
+  await pruneOutboxJobs();
+  await pruneAuditLog();
 }
 
 async function loop(): Promise<void> {
@@ -161,6 +188,8 @@ async function loop(): Promise<void> {
   try {
     await recoverStaleJobs();
     await pruneRefreshTokens();
+    await pruneOutboxJobs();
+    await pruneAuditLog();
   } catch (err) {
     logger.error({ err }, 'Start-Wartung fehlgeschlagen – Worker läuft weiter');
   }

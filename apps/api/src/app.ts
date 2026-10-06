@@ -60,16 +60,22 @@ export function createApp(): express.Express {
   );
   // Metriken früh einhängen, damit alle Requests erfasst werden (auch 4xx/5xx).
   app.use(metricsMiddleware);
-  app.use(
-    express.json({
-      limit: '1mb',
-      // Rohen Body nur referenzieren (kein Copy) – die externe SSH-API
-      // signiert sha256(rawBody) und braucht die exakten Bytes.
-      verify: (req, _res, buf) => {
-        (req as express.Request).rawBody = buf;
-      },
-    }),
-  );
+  // Rohen Body nur referenzieren (kein Copy) – die externe SSH-API
+  // signiert sha256(rawBody) und braucht die exakten Bytes.
+  const rawBodySaver = (req: express.Request, _res: express.Response, buf: Buffer): void => {
+    req.rawBody = buf;
+  };
+  const globalJson = express.json({ limit: '1mb', verify: rawBodySaver });
+  // Der MCP-Server reicht rohe MCP-Bodies (bis 4 MiB, als Base64 im JSON) an
+  // /internal/verify-ssh durch; das globale 1-MB-Limit würde hier vorher 413 liefern.
+  const internalVerifyJson = express.json({ limit: '8mb', verify: rawBodySaver });
+  app.use((req, res, next) => {
+    if (req.path === '/internal/verify-ssh') {
+      internalVerifyJson(req, res, next);
+      return;
+    }
+    globalJson(req, res, next);
+  });
   app.use(cookieParser());
   app.use(originCheck);
 

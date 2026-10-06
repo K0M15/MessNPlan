@@ -38,6 +38,16 @@ function stateCookieOptions() {
   };
 }
 
+/** clearCookie ohne maxAge – sonst setzt Express expires = now + maxAge. */
+function stateCookieClearOptions() {
+  return {
+    httpOnly: true,
+    sameSite: 'lax' as const,
+    secure: config.COOKIE_SECURE,
+    path: OUTLOOK_STATE_PATH,
+  };
+}
+
 /** Bindet den OAuth-Flow an den Browser, der ihn gestartet hat (CSRF-Schutz). */
 function nonceMatches(provided: string | undefined, expected: string): boolean {
   if (!provided || !expected) return false;
@@ -139,7 +149,7 @@ export function outlookRoutes(): Router {
     const browserNonce = (req.cookies as Record<string, string> | undefined)?.[
       OUTLOOK_STATE_COOKIE
     ];
-    res.clearCookie(OUTLOOK_STATE_COOKIE, stateCookieOptions());
+    res.clearCookie(OUTLOOK_STATE_COOKIE, stateCookieClearOptions());
 
     if (!code || !state) {
       redirect(res, projectPath, { outlook: 'error', reason: 'invalid_state' });

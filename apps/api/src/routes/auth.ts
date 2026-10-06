@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router, type Request } from 'express';
 import { and, eq, isNull } from 'drizzle-orm';
 import rateLimit from 'express-rate-limit';
 import { loginSchema } from '@projectplaner/shared';
@@ -28,6 +28,45 @@ async function getDummyHash(): Promise<string> {
   return dummyHash;
 }
 
+/**
+ * Reuse eines soeben rotierten Tokens gilt kurz als Retry (Multi-Tab,
+ * Netzwerk-Retry) und widerruft NICHT die Token-Familie.
+ */
+const REUSE_GRACE_MS = 30_000;
+
+type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+async function issueRotatedToken(
+  tx: DbTransaction,
+  userId: number,
+  req: Request,
+  replacedTokenId?: number,
+): Promise<{ user: typeof users.$inferSelect; newRefresh: string } | null> {
+  const [user] = await tx.select().from(users).where(eq(users.id, userId)).limit(1);
+  if (!user || !user.isActive) return null;
+
+  const newRefresh = generateRefreshToken();
+  const newHash = hashToken(newRefresh);
+
+  // Nachfolger verknüpfen – nur so unterscheidet das Grace-Fenster
+  // "durch Rotation ersetzt" von echtem Widerruf (Logout, Admin).
+  if (replacedTokenId !== undefined) {
+    await tx
+      .update(refreshTokens)
+      .set({ replacedByHash: newHash })
+      .where(eq(refreshTokens.id, replacedTokenId));
+  }
+
+  await tx.insert(refreshTokens).values({
+    userId: user.id,
+    tokenHash: newHash,
+    expiresAt: refreshTokenExpiry(),
+    ip: req.ip?.slice(0, 45),
+    userAgent: req.headers['user-agent']?.slice(0, 255),
+  });
+  return { user, newRefresh };
+}
+
 export function authRoutes(): Router {
   const router = Router();
 
@@ -38,6 +77,16 @@ export function authRoutes(): Router {
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     handler: (_req, _res, next) => next(tooManyRequests('Zu viele Login-Versuche, bitte warten')),
+  });
+
+  // Refresh wird häufig aufgerufen (15-min-Access-Token, Multi-Tab) – moderates Limit.
+  const refreshLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: isDevelopment ? 400 : 120,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    handler: (_req, _res, next) =>
+      next(tooManyRequests('Zu viele Token-Aktualisierungen, bitte warten')),
   });
 
   router.post('/login', loginLimiter, async (req, res) => {
@@ -68,7 +117,7 @@ export function authRoutes(): Router {
     res.json({ user: toUserDto(user) });
   });
 
-  router.post('/refresh', async (req, res) => {
+  router.post('/refresh', refreshLimiter, async (req, res) => {
     const token = (req.cookies as Record<string, string> | undefined)?.[REFRESH_COOKIE];
     if (!token) throw unauthorized('Kein Refresh-Token vorhanden');
 
@@ -84,7 +133,16 @@ export function authRoutes(): Router {
       }
 
       if (row.revokedAt) {
-        // Reuse eines bereits rotierten Tokens → gesamte Token-Familie widerrufen.
+        // Nur durch Rotation ersetzte Tokens gelten kurz als Retry (Multi-Tab/Netz-Retry).
+        // Nach Logout/Admin-Widerruf ist `replacedByHash` NULL → sofortiger Familien-Widerruf.
+        if (
+          row.replacedByHash &&
+          Date.now() - row.revokedAt.getTime() <= REUSE_GRACE_MS
+        ) {
+          const issued = await issueRotatedToken(tx, row.userId, req);
+          if (issued) return { kind: 'ok' as const, ...issued };
+        }
+        // Echte Wiederverwendung eines alten Tokens → gesamte Token-Familie widerrufen.
         await tx
           .update(refreshTokens)
           .set({ revokedAt: new Date() })
@@ -99,6 +157,20 @@ export function authRoutes(): Router {
         .where(and(eq(refreshTokens.id, row.id), isNull(refreshTokens.revokedAt)));
 
       if (revoked.affectedRows === 0) {
+        // Paralleler Request war schneller: frischen Zustand prüfen (Grace-Fenster).
+        const [fresh] = await tx
+          .select()
+          .from(refreshTokens)
+          .where(eq(refreshTokens.id, row.id))
+          .limit(1);
+        if (
+          fresh?.revokedAt &&
+          fresh.replacedByHash &&
+          Date.now() - fresh.revokedAt.getTime() <= REUSE_GRACE_MS
+        ) {
+          const issued = await issueRotatedToken(tx, row.userId, req);
+          if (issued) return { kind: 'ok' as const, ...issued };
+        }
         await tx
           .update(refreshTokens)
           .set({ revokedAt: new Date() })
@@ -106,19 +178,10 @@ export function authRoutes(): Router {
         return { kind: 'reuse' as const };
       }
 
-      const [user] = await tx.select().from(users).where(eq(users.id, row.userId)).limit(1);
-      if (!user || !user.isActive) return { kind: 'invalid' as const };
-
       // Rotation: alter Token ist widerrufen, neuer wird in derselben Transaktion ausgegeben.
-      const newRefresh = generateRefreshToken();
-      await tx.insert(refreshTokens).values({
-        userId: user.id,
-        tokenHash: hashToken(newRefresh),
-        expiresAt: refreshTokenExpiry(),
-        ip: req.ip?.slice(0, 45),
-        userAgent: req.headers['user-agent']?.slice(0, 255),
-      });
-      return { kind: 'ok' as const, user, newRefresh };
+      const issued = await issueRotatedToken(tx, row.userId, req, row.id);
+      if (!issued) return { kind: 'invalid' as const };
+      return { kind: 'ok' as const, ...issued };
     });
 
     if (outcome.kind === 'reuse') {
