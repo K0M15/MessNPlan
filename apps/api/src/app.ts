@@ -5,7 +5,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import { pinoHttp } from 'pino-http';
 import { z } from 'zod';
-import { allowedOrigins, config, trustProxy } from './config.js';
+import { config, isOriginAllowed, trustProxy } from './config.js';
 import { pingDatabase } from './db/client.js';
 import { ApiError } from './errors.js';
 import { originCheck } from './http/auth.js';
@@ -41,7 +41,12 @@ export function createApp(): express.Express {
       crossOriginResourcePolicy: { policy: 'same-site' },
     }),
   );
-  app.use(cors({ origin: allowedOrigins, credentials: true }));
+  app.use(
+    cors({
+      origin: (origin, callback) => callback(null, !origin || isOriginAllowed(origin)),
+      credentials: true,
+    }),
+  );
   app.use(
     pinoHttp({
       logger,

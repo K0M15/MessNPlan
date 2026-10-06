@@ -3,7 +3,7 @@ import { Server } from 'socket.io';
 import type { Role } from '@projectplaner/shared';
 import { REALTIME_EVENTS } from '@projectplaner/shared';
 import { verifyAccessToken } from './auth/tokens.js';
-import { allowedOrigins } from './config.js';
+import { isOriginAllowed } from './config.js';
 import { ACCESS_COOKIE } from './http/auth.js';
 import { logger } from './logger.js';
 import { ensureProjectAccess } from './services/access.js';
@@ -53,7 +53,10 @@ function removeFromPresence(socketId: string): void {
 export function initRealtime(httpServer: HttpServer): Server {
   io = new Server(httpServer, {
     path: '/socket.io',
-    cors: { origin: allowedOrigins, credentials: true },
+    cors: {
+      origin: (origin, callback) => callback(null, !origin || isOriginAllowed(origin)),
+      credentials: true,
+    },
   });
 
   io.use(async (socket, next) => {

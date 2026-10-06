@@ -105,3 +105,14 @@ export const allowedOrigins = [
     ? ['http://localhost:5173', 'http://localhost:3000', 'http://127.0.0.1:5173']
     : []),
 ];
+
+const DEV_ORIGIN_PATTERN = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
+
+/**
+ * Erlaubt konfigurierte Origins; in Development zusätzlich jeden localhost-Port
+ * (z. B. wenn Vite wegen belegter Ports auf 5174/5175 ausweicht).
+ */
+export function isOriginAllowed(origin: string): boolean {
+  if (allowedOrigins.includes(origin)) return true;
+  return isDevelopment && DEV_ORIGIN_PATTERN.test(origin);
+}

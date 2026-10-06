@@ -1,7 +1,7 @@
 import type { NextFunction, Request, Response } from 'express';
 import type { Role } from '@projectplaner/shared';
 import { verifyAccessToken } from '../auth/tokens.js';
-import { allowedOrigins, config } from '../config.js';
+import { config, isOriginAllowed } from '../config.js';
 import { forbidden, unauthorized } from '../errors.js';
 
 export interface AuthUser {
@@ -101,7 +101,7 @@ export function originCheck(req: Request, res: Response, next: NextFunction): vo
     next();
     return;
   }
-  if (allowedOrigins.includes(origin)) {
+  if (isOriginAllowed(origin)) {
     next();
     return;
   }
