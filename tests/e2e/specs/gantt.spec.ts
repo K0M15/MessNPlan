@@ -17,8 +17,15 @@ test('Gantt-Zoom, Planungs-Check und Aufgabenliste im Demo-Projekt', async ({ pa
     await expect(page.locator('canvas').first()).toBeVisible();
   }
 
-  // Health-Panel „Planungs-Check“ ist standardmäßig eingeblendet.
-  await expect(page.getByRole('heading', { name: 'Planungs-Check' })).toBeVisible();
+  // Planungs-Check ist standardmäßig verborgen und öffnet sich per Badge als Modal.
+  const checkBadge = page.getByRole('button', { name: /Check-Hinweise|Planung vollständig/ });
+  await expect(checkBadge).toBeVisible();
+  await expect(page.getByRole('dialog', { name: 'Planungs-Check' })).toHaveCount(0);
+  await checkBadge.click();
+  const healthDialog = page.getByRole('dialog', { name: 'Planungs-Check' });
+  await expect(healthDialog.getByRole('heading', { name: 'Planungs-Check' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(healthDialog).toBeHidden();
 
   // Listen-Tab zeigt den Aufgabenbaum mit Zeilen.
   await page.getByRole('button', { name: 'Liste', exact: true }).click();

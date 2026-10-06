@@ -210,6 +210,43 @@ test('Teilaufgaben aus Drawer und Gantt-Baum anlegen', async ({ page }) => {
   }
 });
 
+test('Planungs-Check öffnet als Modal und springt beim Hinweis zur Aufgabe', async ({ page }) => {
+  const projectName = uniqueProjectName();
+  let projectId: number | null = null;
+
+  try {
+    await login(page);
+    projectId = await createProject(page, projectName);
+
+    await showTaskList(page);
+    await createRootTask(page, 'Ungeplant');
+    await page.keyboard.press('Escape');
+
+    // Standardmäßig ist der Planungs-Check verborgen (kein Dialog, kein Panel).
+    await expect(page.getByRole('dialog', { name: 'Planungs-Check' })).toHaveCount(0);
+
+    // Badge „… Check-Hinweise“ öffnet das Modal (Health kommt per Broadcast nach).
+    const badge = page.getByRole('button', { name: /\d+ Check-Hinweise/ });
+    await expect(badge).toBeVisible({ timeout: 15_000 });
+    await badge.click();
+    const dialog = page.getByRole('dialog', { name: 'Planungs-Check' });
+    await expect(dialog).toBeVisible();
+
+    // Klick auf den Hinweis: Modal schließt und springt zur Aufgabe (Drawer offen).
+    await dialog.getByRole('button', { name: /^Ungeplant:/ }).first().click();
+    await expect(dialog).toBeHidden();
+    await expect(
+      page.getByRole('complementary').getByRole('heading', { name: 'Ungeplant' }),
+    ).toBeVisible();
+  } finally {
+    if (projectId !== null) {
+      await deleteProjectViaApi(page, projectId, projectName).catch((error) => {
+        console.warn(`Cleanup für Projekt ${projectId} fehlgeschlagen:`, error);
+      });
+    }
+  }
+});
+
 test('Aufgabe per Drag & Drop unter eine andere hängen', async ({ page }) => {
   const projectName = uniqueProjectName();
   let projectId: number | null = null;

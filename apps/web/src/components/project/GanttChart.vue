@@ -1081,6 +1081,30 @@ watch(
   },
 );
 
+// „Springe zur Aufgabe“: Zeile vertikal und Balken horizontal in den Blick rücken.
+watch(
+  () => store.focusRequest,
+  async (request) => {
+    if (!request) return;
+    await nextTick();
+    const index = rows.value.findIndex(
+      (row) => row.kind === 'task' && row.task.id === request.taskId,
+    );
+    if (index === -1 || !rightScroll.value) return;
+    const top = Math.max(0, rowTops.value.tops[index]! - 80);
+    const task = store.taskById.get(request.taskId);
+    const startMs = task?.plannedStart ? new Date(task.plannedStart).getTime() : null;
+    const left =
+      startMs !== null && Number.isFinite(startMs)
+        ? Math.max(
+            0,
+            ((startMs - range.value.from) / 60_000) * pxPerMinute.value - viewportW.value / 2,
+          )
+        : rightScroll.value.scrollLeft;
+    rightScroll.value.scrollTo({ left, top, behavior: 'smooth' });
+  },
+);
+
 // ---- Fremd-Auswahl (Presence) --------------------------------------------
 
 /** Feste Farbskala, je User-ID stabil zugeordnet. */

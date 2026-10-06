@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, nextTick, ref, watch } from 'vue';
 import { useProjectStore } from '@/stores/project';
 import { useToasts } from '@/composables/useToasts';
 import { formatDateTime } from '@/utils/datetime';
@@ -145,6 +145,21 @@ async function onDropOnRoot(event: DragEvent): Promise<void> {
   }
 }
 
+// ---- „Springe zur Aufgabe“ -------------------------------------------------
+
+const rootEl = ref<HTMLElement | null>(null);
+
+watch(
+  () => store.focusRequest,
+  async (request) => {
+    if (!request) return;
+    await nextTick();
+    rootEl.value
+      ?.querySelector<HTMLElement>(`[data-task-id="${request.taskId}"]`)
+      ?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  },
+);
+
 const rootTaskName = ref('');
 async function addRootTask(): Promise<void> {
   if (!rootTaskName.value.trim()) return;
@@ -154,7 +169,7 @@ async function addRootTask(): Promise<void> {
 </script>
 
 <template>
-  <div class="rounded-xl border border-slate-200 bg-white shadow-sm">
+  <div ref="rootEl" class="rounded-xl border border-slate-200 bg-white shadow-sm">
     <div v-if="store.canWrite" class="flex gap-2 border-b border-slate-100 p-2">
       <input
         v-model="rootTaskName"
@@ -192,6 +207,7 @@ async function addRootTask(): Promise<void> {
           'bg-indigo-50/70 ring-1 ring-inset ring-indigo-400': dropTargetId === row.task.id,
         }"
         :draggable="store.canWrite ? 'true' : 'false'"
+        :data-task-id="row.task.id"
         @click="store.setSelection(row.task.id)"
         @dragstart="onDragStart($event, row.task)"
         @dragover="onDragOver($event, row.task)"

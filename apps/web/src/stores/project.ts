@@ -86,6 +86,9 @@ export const useProjectStore = defineStore('project', () => {
 
   const selectedTaskId = ref<number | null>(null);
   const expandedIds = ref<Set<number>>(new Set());
+  /** Einmaliger Fokus-Request („Springe zur Aufgabe“) für die aktive Ansicht. */
+  const focusRequest = ref<{ taskId: number; nonce: number } | null>(null);
+  let focusNonce = 0;
 
   let socket: Socket | null = null;
   /** Projekt, dessen Room der aktuelle Socket (wieder) betreten soll. */
@@ -125,6 +128,7 @@ export const useProjectStore = defineStore('project', () => {
       projectId.value = id;
       selectedTaskId.value = null;
       expandedIds.value = new Set();
+      focusRequest.value = null;
       apiKeys.value = [];
       resourceAbsences.value = [];
       absenceResourceId.value = null;
@@ -607,6 +611,30 @@ export const useProjectStore = defineStore('project', () => {
     expandedIds.value = next;
   }
 
+  /**
+   * „Springe zur Aufgabe“: klappt alle Vorfahren auf, wählt die Aufgabe aus
+   * und signalisiert der aktiven Ansicht (Liste/Gantt) per `focusRequest`,
+   * die Aufgabe in den sichtbaren Bereich zu scrollen.
+   */
+  function focusTask(taskId: number): void {
+    if (!taskById.value.has(taskId)) return;
+    const ancestors: number[] = [];
+    const seen = new Set<number>();
+    let cursor = taskById.value.get(taskId)?.parentId ?? null;
+    while (cursor !== null && !seen.has(cursor)) {
+      seen.add(cursor);
+      ancestors.push(cursor);
+      cursor = taskById.value.get(cursor)?.parentId ?? null;
+    }
+    if (ancestors.length > 0) {
+      const next = new Set(expandedIds.value);
+      for (const id of ancestors) next.add(id);
+      expandedIds.value = next;
+    }
+    setSelection(taskId);
+    focusRequest.value = { taskId, nonce: ++focusNonce };
+  }
+
   // ---- Mutationen ---------------------------------------------------------
 
   async function createTask(input: CreateTaskInput): Promise<TaskDto | null> {
@@ -1001,6 +1029,7 @@ export const useProjectStore = defineStore('project', () => {
     presence,
     presenceSelections,
     selectedTaskId,
+    focusRequest,
     selectedTask,
     expandedIds,
     canWrite,
@@ -1028,6 +1057,7 @@ export const useProjectStore = defineStore('project', () => {
     updateApiKey,
     deleteApiKey,
     setSelection,
+    focusTask,
     toggleExpanded,
     createTask,
     updateTask,

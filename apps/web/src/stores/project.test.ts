@@ -224,4 +224,47 @@ describe('useProjectStore – Realtime-Room', () => {
     );
     expect(store.expandedIds.has(1)).toBe(true);
   });
+
+  it('springt zur Aufgabe: Vorfahren aufklappen, Auswahl und Fokus-Request', async () => {
+    const store = useProjectStore();
+    const child = {
+      id: 2,
+      projectId: PROJECT_ID,
+      parentId: 1,
+      name: 'Kind',
+      plannedStart: null,
+      plannedEnd: null,
+      estimatedMinutes: null,
+      version: 1,
+    };
+    const parent = {
+      id: 1,
+      projectId: PROJECT_ID,
+      parentId: null,
+      name: 'Eltern',
+      plannedStart: null,
+      plannedEnd: null,
+      estimatedMinutes: null,
+      version: 1,
+      children: [child],
+    };
+    apiMock.get.mockImplementation((path: string) => {
+      if (path === `/projects/${PROJECT_ID}/tasks?tree=1`) {
+        return Promise.resolve({ items: [parent] });
+      }
+      return Promise.resolve(apiResponse(path));
+    });
+    await store.load(PROJECT_ID);
+    expect(store.expandedIds.has(1)).toBe(true);
+
+    store.toggleExpanded(1); // zuklappen
+    expect(store.expandedIds.has(1)).toBe(false);
+
+    store.focusTask(2);
+
+    expect(store.expandedIds.has(1)).toBe(true);
+    expect(store.selectedTaskId).toBe(2);
+    expect(store.focusRequest).toMatchObject({ taskId: 2 });
+    expect(store.focusRequest?.nonce).toBeGreaterThan(0);
+  });
 });
