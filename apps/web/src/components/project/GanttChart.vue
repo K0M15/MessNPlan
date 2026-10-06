@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { DateTime } from 'luxon';
 import { ABSENCE_TYPE_LABELS, type AbsenceType } from '@projectplaner/shared';
 import { useProjectStore } from '@/stores/project';
@@ -160,6 +160,46 @@ const rowTops = computed(() => {
 });
 
 const totalHeight = computed(() => rowTops.value.total);
+
+// ---- Teilaufgabe direkt im Gantt-Baum anlegen ------------------------------
+
+const addingChildOf = ref<number | null>(null);
+const newChildName = ref('');
+const addChildInput = ref<HTMLInputElement | null>(null);
+
+const addChildIndex = computed(() => {
+  if (addingChildOf.value === null) return -1;
+  return rows.value.findIndex(
+    (row) => row.kind === 'task' && row.task.id === addingChildOf.value,
+  );
+});
+
+/** Absolute Y-Position der Eingabe (unterhalb der Elternzeile im linken Baum). */
+const addChildTop = computed(() => {
+  const index = addChildIndex.value;
+  if (index === -1) return 0;
+  return rowTops.value.tops[index]! + rows.value[index]!.height;
+});
+
+const addChildParentName = computed(() => {
+  const row = addChildIndex.value === -1 ? undefined : rows.value[addChildIndex.value];
+  return row?.kind === 'task' ? row.task.name : '';
+});
+
+function startAddChild(taskId: number): void {
+  addingChildOf.value = taskId;
+  newChildName.value = '';
+  void nextTick(() => addChildInput.value?.focus());
+}
+
+async function submitAddChild(): Promise<void> {
+  if (addingChildOf.value === null || !newChildName.value.trim()) return;
+  const parentId = addingChildOf.value;
+  const name = newChildName.value.trim();
+  addingChildOf.value = null;
+  newChildName.value = '';
+  await store.createTask({ parentId, name });
+}
 
 // ---- Zeitraum & Zoom ------------------------------------------------------
 
@@ -1190,7 +1230,18 @@ const legend = [
                   <span v-if="row.task.isMilestone" class="shrink-0 text-[10px]">◆</span>
                   <span v-if="row.task.constraintType !== 'asap'" class="shrink-0 text-[10px]" title="Start-Constraint">📌</span>
                   <span class="truncate" :class="{ 'font-medium': row.task.children?.length }">{{ row.task.name }}</span>
-                  <span v-if="row.sched?.critical" class="ml-auto shrink-0 rounded bg-red-50 px-1 text-[10px] text-red-600">kritisch</span>
+                  <span class="ml-auto flex shrink-0 items-center gap-1">
+                    <span v-if="row.sched?.critical" class="rounded bg-red-50 px-1 text-[10px] text-red-600">kritisch</span>
+                    <button
+                      v-if="store.canWrite"
+                      type="button"
+                      class="grid h-4 w-4 shrink-0 place-items-center rounded border border-slate-200 bg-white text-xs leading-none text-slate-500 shadow-sm transition hover:border-indigo-300 hover:bg-indigo-50 hover:text-indigo-600"
+                      title="Teilaufgabe anlegen"
+                      @click.stop="startAddChild(row.task.id)"
+                    >
+                      +
+                    </button>
+                  </span>
                 </div>
                 <div
                   v-else
@@ -1203,6 +1254,24 @@ const legend = [
                 </div>
               </template>
             </div>
+          </div>
+
+          <!-- Inline-Eingabe: Teilaufgabe direkt im Gantt-Baum anlegen -->
+          <div
+            v-if="addingChildOf !== null"
+            class="absolute inset-x-0 z-20 px-2"
+            :style="{ top: `${addChildTop}px` }"
+          >
+            <input
+              ref="addChildInput"
+              v-model="newChildName"
+              :placeholder="`Teilaufgabe von „${addChildParentName}“…`"
+              class="w-full rounded-md border border-indigo-300 bg-white px-2 py-1 text-sm shadow-lg outline-none"
+              @mousedown.stop
+              @click.stop
+              @keydown.enter="submitAddChild"
+              @keydown.esc="addingChildOf = null"
+            />
           </div>
         </div>
       </div>

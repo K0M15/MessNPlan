@@ -52,7 +52,7 @@ const socketMock = vi.hoisted((): MockSocket => {
   return socket;
 });
 
-const apiMock = vi.hoisted(() => ({ get: vi.fn(), getConditional: vi.fn() }));
+const apiMock = vi.hoisted(() => ({ get: vi.fn(), getConditional: vi.fn(), post: vi.fn() }));
 
 vi.mock('socket.io-client', () => ({ io: vi.fn(() => socketMock) }));
 
@@ -70,7 +70,7 @@ vi.mock('@/api/client', () => ({
   api: {
     get: apiMock.get,
     getConditional: apiMock.getConditional,
-    post: vi.fn(),
+    post: apiMock.post,
     patch: vi.fn(),
     put: vi.fn(),
     del: vi.fn(),
@@ -117,10 +117,12 @@ describe('useProjectStore – Realtime-Room', () => {
     socketMock.reset();
     apiMock.get.mockReset();
     apiMock.getConditional.mockReset();
+    apiMock.post.mockReset();
     apiMock.get.mockImplementation((path: string) => Promise.resolve(apiResponse(path)));
     apiMock.getConditional.mockImplementation((path: string) =>
       Promise.resolve({ notModified: false, data: apiResponse(path), etag: '"gv1"' }),
     );
+    apiMock.post.mockResolvedValue({ task: {} });
     setActivePinia(createPinia());
   });
 
@@ -206,5 +208,20 @@ describe('useProjectStore – Realtime-Room', () => {
 
     rollback();
     expect(store.taskById.get(1)?.plannedStart).toBe(baseTask.plannedStart);
+  });
+
+  it('verschiebt Aufgaben und klappt den neuen Elternteil auf', async () => {
+    const store = useProjectStore();
+    await store.load(PROJECT_ID);
+
+    const ok = await store.moveTask(2, 1, undefined, 5);
+
+    expect(ok).toBe(true);
+    expect(apiMock.post).toHaveBeenCalledWith(
+      '/tasks/2/move',
+      { parentId: 1, sortOrder: undefined },
+      { version: 5 },
+    );
+    expect(store.expandedIds.has(1)).toBe(true);
   });
 });

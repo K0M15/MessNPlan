@@ -669,6 +669,12 @@ export const useProjectStore = defineStore('project', () => {
     try {
       await api.post(`/tasks/${taskId}/move`, { parentId, sortOrder }, { version });
       await refreshTasks();
+      if (parentId !== null) {
+        // Neuen Elternteil aufklappen, damit die verschobene Aufgabe sichtbar ist.
+        const next = new Set(expandedIds.value);
+        next.add(parentId);
+        expandedIds.value = next;
+      }
       return true;
     } catch (err) {
       toasts.error(handleError(err, 'Verschieben fehlgeschlagen'));

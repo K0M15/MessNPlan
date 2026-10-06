@@ -337,7 +337,22 @@ async function removeTask(): Promise<void> {
   }
 }
 
-/** ESC schließt das Sheet, ohne die Formularwerte zu speichern. */
+// ---- Teilaufgabe direkt im Drawer anlegen ---------------------------------
+
+const newSubtaskName = ref('');
+
+async function addSubtask(): Promise<void> {
+  const task = store.selectedTask;
+  if (!task || !newSubtaskName.value.trim()) return;
+  // Offene Formularänderungen der aktuellen Aufgabe zuerst sichern.
+  await flushPendingSave();
+  const created = await store.createTask({ parentId: task.id, name: newSubtaskName.value.trim() });
+  if (!created) return;
+  newSubtaskName.value = '';
+  toasts.success('Teilaufgabe angelegt');
+}
+
+/** ESC schließt das Sheet (offene Änderungen werden vorher gespeichert). */
 function onKeydown(event: KeyboardEvent): void {
   if (event.key === 'Escape' && store.selectedTaskId !== null) {
     closeDrawer();
@@ -506,6 +521,31 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
               + Tag
             </button>
           </div>
+        </div>
+
+        <div v-if="store.canWrite" class="rounded-lg border border-slate-200 p-3">
+          <h3 class="mb-2 text-xs font-medium uppercase tracking-wide text-slate-400">
+            Teilaufgabe anlegen
+          </h3>
+          <div class="flex gap-2">
+            <input
+              v-model="newSubtaskName"
+              placeholder="Name der Teilaufgabe…"
+              class="min-w-0 flex-1 rounded-md border border-slate-200 px-3 py-2 text-sm outline-none focus:border-indigo-400"
+              @keydown.enter="addSubtask"
+            />
+            <button
+              type="button"
+              class="shrink-0 rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
+              :disabled="!newSubtaskName.trim()"
+              @click="addSubtask"
+            >
+              Anlegen
+            </button>
+          </div>
+          <p class="mt-1 text-xs text-slate-400">
+            Die neue Teilaufgabe öffnet sich direkt im Drawer.
+          </p>
         </div>
       </div>
 
