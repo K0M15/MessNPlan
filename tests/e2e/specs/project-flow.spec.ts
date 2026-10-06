@@ -48,6 +48,34 @@ async function saveEstimate(childRow: Locator, drawer: Locator, hours: number): 
   await expect(childRow).toContainText(`${hours} h`, { timeout: 10_000 });
 }
 
+/** Projekt über die UI anlegen und öffnen; liefert die Projekt-ID. */
+async function createProject(page: Page, projectName: string): Promise<number> {
+  await page.getByRole('button', { name: 'Neues Projekt' }).click();
+  await page.getByLabel('Name').fill(projectName);
+  await page.getByRole('button', { name: 'Anlegen', exact: true }).click();
+  const card = page.getByRole('link').filter({ hasText: projectName });
+  await expect(card).toBeVisible();
+  await card.click();
+  await expect(page).toHaveURL(/\/projects\/\d+/);
+  const match = /\/projects\/(\d+)/.exec(page.url());
+  if (!match) throw new Error(`Projekt-ID nicht in URL gefunden: ${page.url()}`);
+  return Number(match[1]);
+}
+
+/** Gantt-Ansicht anzeigen. */
+async function showGanttView(page: Page): Promise<void> {
+  await page.getByRole('button', { name: 'Gantt', exact: true }).click();
+  await expect(page.getByText('Aufgabe / Ressource')).toBeVisible();
+}
+
+/** Aktuellen parentId einer Aufgabe über die API lesen. */
+async function taskParentId(page: Page, taskId: number): Promise<number | null> {
+  const response = await page.request.get(`/api/v1/tasks/${taskId}`);
+  expect(response.status(), `GET /tasks/${taskId}`).toBe(200);
+  const body = (await response.json()) as { task: { parentId: number | null } };
+  return body.task.parentId;
+}
+
 test('Projekt mit Aufgabe, Teilaufgabe, Schätzung und FS-Abhängigkeit anlegen', async ({
   page,
 }) => {
@@ -75,12 +103,12 @@ test('Projekt mit Aufgabe, Teilaufgabe, Schätzung und FS-Abhängigkeit anlegen'
     await showTaskList(page);
     await createRootTask(page, 'Planung');
 
-    // Teilaufgabe über den „+“-Button der Zeile anlegen
+    // Teilaufgabe über den jetzt immer sichtbaren „+ Teilaufgabe“-Button anlegen
     const childRow = page.locator('div.group').filter({ hasText: 'Teilaufgabe 1' });
+    const planungRow = page.locator('div.group').filter({ hasText: 'Planung' });
+    await expect(planungRow.getByTitle('Teilaufgabe anlegen')).toBeVisible();
     await expect(async () => {
       if ((await childRow.count()) === 0) {
-        const planungRow = page.locator('div.group').filter({ hasText: 'Planung' });
-        await planungRow.hover();
         await planungRow.getByTitle('Teilaufgabe anlegen').click();
         const childInput = page.getByPlaceholder(/Teilaufgabe von/);
         await childInput.fill('Teilaufgabe 1');
@@ -129,6 +157,84 @@ test('Projekt mit Aufgabe, Teilaufgabe, Schätzung und FS-Abhängigkeit anlegen'
     }).toPass({ timeout: 10_000 });
   } finally {
     // Aufräumen über die API, damit die Projektliste schlank bleibt.
+    if (projectId !== null) {
+      await deleteProjectViaApi(page, projectId, projectName).catch((error) => {
+        console.warn(`Cleanup für Projekt ${projectId} fehlgeschlagen:`, error);
+      });
+    }
+  }
+});
+
+test('Teilaufgaben aus Drawer und Gantt-Baum anlegen', async ({ page }) => {
+  const projectName = uniqueProjectName();
+  let projectId: number | null = null;
+
+  try {
+    await login(page);
+    projectId = await createProject(page, projectName);
+
+    await showTaskList(page);
+    await createRootTask(page, 'Eltern');
+    await page.locator('div.group').filter({ hasText: 'Eltern' }).first().click();
+
+    // 1) Direkt aus dem Aufgaben-Drawer heraus anlegen.
+    const drawer = page.getByRole('complementary');
+    await expect(drawer.getByRole('heading', { name: 'Eltern' })).toBeVisible();
+    await drawer.getByPlaceholder('Name der Teilaufgabe…').fill('Aus Drawer');
+    await drawer.getByRole('button', { name: 'Anlegen', exact: true }).click();
+    await expect(drawer.getByRole('heading', { name: 'Aus Drawer' })).toBeVisible();
+    await drawer.getByRole('button', { name: 'Schließen' }).click();
+
+    // 2) Direkt aus dem Gantt-Baum heraus anlegen (ohne Ansichtswechsel).
+    await showGanttView(page);
+    const elternRow = page.locator('div.cursor-pointer').filter({ hasText: 'Eltern' }).first();
+    await elternRow.getByTitle('Teilaufgabe anlegen').click();
+    const ganttInput = page.getByPlaceholder(/Teilaufgabe von/);
+    await ganttInput.fill('Aus Gantt');
+    await ganttInput.press('Enter');
+
+    // Beide Teilaufgaben hängen unter „Eltern“ (über die API geprüft).
+    const elternId = await findTaskId(page, projectId, 'Eltern');
+    await expect(async () => {
+      const fromDrawer = await findTaskId(page, projectId, 'Aus Drawer');
+      const fromGantt = await findTaskId(page, projectId, 'Aus Gantt');
+      expect(await taskParentId(page, fromDrawer), 'aus dem Drawer').toBe(elternId);
+      expect(await taskParentId(page, fromGantt), 'aus dem Gantt').toBe(elternId);
+    }).toPass({ timeout: 10_000 });
+  } finally {
+    if (projectId !== null) {
+      await deleteProjectViaApi(page, projectId, projectName).catch((error) => {
+        console.warn(`Cleanup für Projekt ${projectId} fehlgeschlagen:`, error);
+      });
+    }
+  }
+});
+
+test('Aufgabe per Drag & Drop unter eine andere hängen', async ({ page }) => {
+  const projectName = uniqueProjectName();
+  let projectId: number | null = null;
+
+  try {
+    await login(page);
+    projectId = await createProject(page, projectName);
+
+    await showTaskList(page);
+    await createRootTask(page, 'Ziel');
+    await createRootTask(page, 'Quelle');
+
+    // Drawer schließen, damit die Zeilen frei zugänglich sind.
+    await page.keyboard.press('Escape');
+
+    const source = page.locator('div.group').filter({ hasText: 'Quelle' }).first();
+    const target = page.locator('div.group').filter({ hasText: 'Ziel' }).first();
+    await source.dragTo(target);
+
+    const quelleId = await findTaskId(page, projectId, 'Quelle');
+    const zielId = await findTaskId(page, projectId, 'Ziel');
+    await expect(async () => {
+      expect(await taskParentId(page, quelleId), 'Quelle liegt unter Ziel').toBe(zielId);
+    }).toPass({ timeout: 10_000 });
+  } finally {
     if (projectId !== null) {
       await deleteProjectViaApi(page, projectId, projectName).catch((error) => {
         console.warn(`Cleanup für Projekt ${projectId} fehlgeschlagen:`, error);
