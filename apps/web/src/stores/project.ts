@@ -67,6 +67,8 @@ export const useProjectStore = defineStore('project', () => {
   const expandedIds = ref<Set<number>>(new Set());
 
   let socket: Socket | null = null;
+  /** Projekt, dessen Room der aktuelle Socket (wieder) betreten soll. */
+  let joinedProjectId: number | null = null;
   let refreshTimer: number | undefined;
 
   const flatTasks = computed<TaskDto[]>(() => {
@@ -344,9 +346,30 @@ export const useProjectStore = defineStore('project', () => {
     }, 400);
   }
 
+  /**
+   * Betritt den Projekt-Room. Wird bei jedem (Re-)Connect erneut aufgerufen, weil die
+   * serverseitige Roommitgliedschaft bei Reconnects (Netzabbruch, Token-Refresh) verloren geht.
+   * Eine bestehende Aufgaben-Auswahl wird dabei erneut an den Server gemeldet.
+   */
+  function joinRoom(): void {
+    if (!socket || joinedProjectId === null) return;
+    socket.emit('project:join', joinedProjectId);
+    if (selectedTaskId.value !== null) {
+      socket.emit('presence:selection', {
+        projectId: joinedProjectId,
+        taskId: selectedTaskId.value,
+      });
+    }
+  }
+
   function connectRealtime(id: number): void {
     socket = connectSocket();
-    socket.emit('project:join', id);
+    joinedProjectId = id;
+    // Vor dem Registrieren entfernen, damit mehrfaches connectRealtime keine doppelten Handler erzeugt.
+    socket.off('connect', joinRoom);
+    socket.on('connect', joinRoom);
+    // Ist der Socket bereits verbunden, sofort beitreten; sonst übernimmt das der connect-Handler.
+    if (socket.connected) joinRoom();
     socket.on(REALTIME_EVENTS.SCHEDULE_UPDATED, () => scheduleRefresh());
     socket.on(REALTIME_EVENTS.TASK_CHANGED, () => scheduleRefresh());
     socket.on(REALTIME_EVENTS.PROJECT_CHANGED, () => scheduleRefresh());
@@ -406,12 +429,14 @@ export const useProjectStore = defineStore('project', () => {
   function disconnectRealtime(): void {
     if (!socket) return;
     if (projectId.value !== null) socket.emit('project:leave', projectId.value);
+    socket.off('connect', joinRoom);
     socket.off(REALTIME_EVENTS.SCHEDULE_UPDATED);
     socket.off(REALTIME_EVENTS.TASK_CHANGED);
     socket.off(REALTIME_EVENTS.PROJECT_CHANGED);
     socket.off(REALTIME_EVENTS.PRESENCE_STATE);
     socket.off(REALTIME_EVENTS.PRESENCE_SELECTION);
     socket = null;
+    joinedProjectId = null;
     presence.value = [];
     presenceSelections.value = new Map();
   }
