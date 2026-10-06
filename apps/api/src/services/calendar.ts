@@ -30,10 +30,30 @@ function parseTime(value: string): { hour: number; minute: number } {
 const EPSILON = 1e-6;
 const GUARD = 10_000;
 const DAY_MS = 86_400_000;
+const EPOCH_ISO = '1970-01-01';
+/** Obergrenze für die Tages-Summen im Slow-Fallback (~1000 Jahre). */
+const MAX_SLOW_SCAN_DAYS = 400_000;
+
+/** Nächster Kalendertag `YYYY-MM-DD` (UTC-Datumsarithmetik, DST-unabhängig). */
+function nextIsoDay(iso: string): string {
+  const [year = 1970, month = 1, day = 1] = iso.split('-').map(Number);
+  return new Date(Date.UTC(year, month - 1, day) + DAY_MS).toISOString().slice(0, 10);
+}
+
+/** Vorheriger Kalendertag `YYYY-MM-DD` (UTC-Datumsarithmetik, DST-unabhängig). */
+function previousIsoDay(iso: string): string {
+  const [year = 1970, month = 1, day = 1] = iso.split('-').map(Number);
+  return new Date(Date.UTC(year, month - 1, day) - DAY_MS).toISOString().slice(0, 10);
+}
 
 /**
  * Arbeitskalender eines Projekts: verschiebt Zeitpunkte unter Beachtung von
  * Arbeitswoche, Tagesfenster und Feiertagen (alles in Projekt-Zeitzone).
+ *
+ * DST: Die Fenstergrenzen eines Tages werden als Wall-Clock (`set({ hour, … })`)
+ * bestimmt, nie per Millisekunden-Addition an den Tagesbeginn. An Umstellungstagen
+ * hat ein Arbeitstag dadurch real 23 h bzw. 25 h und das Fenster entsprechend
+ * 1 h weniger/mehr verstrichene Minuten; die Fensterlänge wird pro Tag geführt.
  *
  * Performance: Luxon-Zonenberechnungen (`Intl.formatToParts`) sind teuer. Für
  * heiße Pfade (Scheduling, Slack, Auslastung) materialisiert `precomputeRange`
@@ -46,12 +66,11 @@ export class WorkCalendar {
   private readonly end: { hour: number; minute: number };
   private readonly holidaySet: Set<string>;
   private readonly workdayMinutes: number;
-  private readonly epochDayMs: number;
   private readonly dayCache = new Map<string, DayWindow | null>();
 
   private materialDays: MaterialDay[] = [];
-  /** workPrefix[i] = Anzahl Arbeitstage in materialDays[0..i-1]. */
-  private workPrefix: number[] = [0];
+  /** minutesPrefix[i] = Arbeitsminuten in materialDays[0..i-1] (DST-Tage zählen real). */
+  private minutesPrefix: number[] = [0];
 
   constructor(readonly config: CalendarConfig) {
     this.start = parseTime(config.workdayStart);
@@ -60,9 +79,6 @@ export class WorkCalendar {
     const endMinutes = this.end.hour * 60 + this.end.minute;
     this.workdayMinutes = Math.max(1, endMinutes - startMinutes);
     this.holidaySet = new Set(config.holidays);
-    this.epochDayMs = DateTime.fromISO('1970-01-01', { zone: config.timezone })
-      .startOf('day')
-      .toMillis();
   }
 
   get timezone(): string {
@@ -116,20 +132,39 @@ export class WorkCalendar {
       const iso = cursor.toISODate() ?? '';
       const win = this.windowForDay(iso, cursor);
       days.push({ iso, startMs: cursor.toMillis(), nextStartMs: next.toMillis(), win });
-      prefix.push(prefix[i]! + (win ? 1 : 0));
+      prefix.push(prefix[i]! + (win ? win.minutes : 0));
       cursor = next;
     }
 
     this.materialDays = days;
-    this.workPrefix = prefix;
+    this.minutesPrefix = prefix;
   }
 
-  /** Arbeitstag-Fenster für einen materialisierten Tag (ohne Luxon-Zonen-Setup). */
+  /**
+   * Arbeitstag-Fenster eines Tages. Start/Ende werden per Luxon-Wall-Clock
+   * (`set`) gesetzt – Millisekunden-Addition an den Tagesbeginn würde die
+   * Grenzen an DST-Umstellungstagen um ±1 h verschieben. `minutes` ist die
+   * tatsächlich verstrichene Fensterlänge (23-h-/25-h-Tage).
+   */
   private windowForDay(iso: string, day: DateTime): DayWindow | null {
     const jsDay = day.weekday % 7;
     if (!this.config.workweek.includes(jsDay) || this.holidaySet.has(iso)) return null;
-    const startMs = day.toMillis() + (this.start.hour * 60 + this.start.minute) * 60_000;
-    return { startMs, endMs: startMs + this.workdayMinutes * 60_000, minutes: this.workdayMinutes };
+    const start = day.set({
+      hour: this.start.hour,
+      minute: this.start.minute,
+      second: 0,
+      millisecond: 0,
+    });
+    const end = day.set({
+      hour: this.end.hour,
+      minute: this.end.minute,
+      second: 0,
+      millisecond: 0,
+    });
+    const startMs = start.toMillis();
+    const endMs = end.toMillis();
+    if (endMs <= startMs) return null;
+    return { startMs, endMs, minutes: (endMs - startMs) / 60_000 };
   }
 
   /** Index des materialisierten Tages, der `ms` enthält, oder -1 (außerhalb). */
@@ -159,19 +194,7 @@ export class WorkCalendar {
   private dayInfoSlow(iso: string): DayWindow | null {
     if (this.dayCache.has(iso)) return this.dayCache.get(iso) ?? null;
     const dt = DateTime.fromISO(iso, { zone: this.config.timezone });
-    let info: DayWindow | null = null;
-    if (dt.isValid) {
-      const jsDay = dt.weekday % 7;
-      if (this.config.workweek.includes(jsDay) && !this.holidaySet.has(iso)) {
-        const startMs = dt
-          .set({ hour: this.start.hour, minute: this.start.minute, second: 0, millisecond: 0 })
-          .toMillis();
-        const endMs = dt
-          .set({ hour: this.end.hour, minute: this.end.minute, second: 0, millisecond: 0 })
-          .toMillis();
-        if (endMs > startMs) info = { startMs, endMs, minutes: (endMs - startMs) / 60_000 };
-      }
-    }
+    const info = dt.isValid ? this.windowForDay(iso, dt) : null;
     this.dayCache.set(iso, info);
     return info;
   }
@@ -251,28 +274,42 @@ export class WorkCalendar {
     return (ms - info.startMs) / 60_000;
   }
 
-  private workingDaysBeforeMsSlow(ms: number): number {
-    const day = DateTime.fromMillis(ms, { zone: this.config.timezone }).startOf('day');
-    const days = Math.round((day.toMillis() - this.epochDayMs) / DAY_MS);
-    let full = 0;
-    for (const weekday of this.config.workweek) {
-      const firstOffset = (weekday - 4 + 7) % 7; // 1970-01-01 = Donnerstag
-      if (firstOffset < days) full += Math.floor((days - 1 - firstOffset) / 7) + 1;
+  /**
+   * Arbeitsminuten aller Arbeitstage vor dem lokalen Kalendertag von `ms`.
+   * Summiert die echten Tagesfenster (DST-Tage weichen von der Regellänge ab);
+   * O(Tage), läuft nur außerhalb des materialisierten Bereichs. Vor 1970 wird
+   * rückwärts negativ akkumuliert (Differenzen bleiben dadurch korrekt).
+   */
+  private workingMinutesBeforeMsSlow(ms: number): number {
+    const targetIso = DateTime.fromMillis(ms, { zone: this.config.timezone }).toISODate();
+    if (!targetIso) return 0;
+    let total = 0;
+    if (targetIso >= EPOCH_ISO) {
+      let iso = EPOCH_ISO;
+      for (let i = 0; iso < targetIso && i < MAX_SLOW_SCAN_DAYS; i++) {
+        const win = this.dayInfoSlow(iso);
+        if (win) total += win.minutes;
+        iso = nextIsoDay(iso);
+      }
+    } else {
+      let iso = EPOCH_ISO;
+      for (let i = 0; iso > targetIso && i < MAX_SLOW_SCAN_DAYS; i++) {
+        iso = previousIsoDay(iso);
+        const win = this.dayInfoSlow(iso);
+        if (win) total -= win.minutes;
+      }
     }
-    for (const holiday of this.config.holidays) {
-      const dt = DateTime.fromISO(holiday, { zone: this.config.timezone });
-      if (!dt.isValid) continue;
-      const jsDay = dt.weekday % 7;
-      if (!this.config.workweek.includes(jsDay)) continue;
-      if (dt.startOf('day').toMillis() < day.toMillis()) full -= 1;
-    }
-    return full;
+    return total;
   }
 
   private workingMinutesBetweenSlow(fromMs: number, toMs: number): number {
     if (toMs <= fromMs) return 0;
-    const fullDays = this.workingDaysBeforeMsSlow(toMs) - this.workingDaysBeforeMsSlow(fromMs);
-    return fullDays * this.workdayMinutes + this.minutesIntoMsSlow(toMs) - this.minutesIntoMsSlow(fromMs);
+    return (
+      this.workingMinutesBeforeMsSlow(toMs) -
+      this.workingMinutesBeforeMsSlow(fromMs) +
+      this.minutesIntoMsSlow(toMs) -
+      this.minutesIntoMsSlow(fromMs)
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -368,10 +405,9 @@ export class WorkCalendar {
         if (ms >= day.win.endMs) return day.win.minutes;
         return (ms - day.win.startMs) / 60_000;
       };
-      const fullDays = this.workPrefix[toIdx]! - this.workPrefix[fromIdx]!;
-      return (
-        fullDays * this.workdayMinutes + into(toDay, toMs) - into(fromDay, fromMs)
-      );
+      // Präfixsumme in Minuten: DST-Tage tragen ihre reale Fensterlänge bei.
+      const full = this.minutesPrefix[toIdx]! - this.minutesPrefix[fromIdx]!;
+      return full + into(toDay, toMs) - into(fromDay, fromMs);
     }
     return this.workingMinutesBetweenSlow(fromMs, toMs);
   }
