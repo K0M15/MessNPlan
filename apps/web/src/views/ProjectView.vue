@@ -18,7 +18,7 @@ const route = useRoute();
 
 const view = ref<'gantt' | 'list'>('gantt');
 const showResources = ref(false);
-const showHealth = ref(true);
+const showHealth = ref(false);
 const showMembers = ref(false);
 const showSettings = ref(false);
 const recomputing = ref(false);
@@ -59,6 +59,12 @@ async function createRootTask(): Promise<void> {
   const task = await store.createTask({ name: 'Neue Aufgabe' });
   if (task) toasts.success('Aufgabe angelegt');
 }
+
+/** Ressourcen-Hinweis im Planungs-Check: Modal wechselt zur Ressourcenverwaltung. */
+function onHealthResourceIssue(): void {
+  showHealth.value = false;
+  showResources.value = true;
+}
 </script>
 
 <template>
@@ -87,15 +93,24 @@ async function createRootTask(): Promise<void> {
             <span class="rounded-full bg-white px-2 py-0.5 ring-1 ring-slate-200">
               {{ store.resources.length }} Ressourcen
             </span>
-            <span
+            <button
               v-if="healthCount > 0"
-              class="rounded-full bg-red-50 px-2 py-0.5 font-medium text-red-700 ring-1 ring-red-200"
+              type="button"
+              class="cursor-pointer rounded-full bg-red-50 px-2 py-0.5 font-medium text-red-700 ring-1 ring-red-200 transition hover:bg-red-100"
+              title="Planungs-Check öffnen"
+              @click="showHealth = true"
             >
               {{ healthCount }} Check-Hinweise
-            </span>
-            <span v-else class="rounded-full bg-emerald-50 px-2 py-0.5 text-emerald-700 ring-1 ring-emerald-200">
+            </button>
+            <button
+              v-else
+              type="button"
+              class="cursor-pointer rounded-full bg-emerald-50 px-2 py-0.5 text-emerald-700 ring-1 ring-emerald-200 transition hover:bg-emerald-100"
+              title="Planungs-Check öffnen"
+              @click="showHealth = true"
+            >
               Planung vollständig
-            </span>
+            </button>
             <span
               v-if="store.presence.length > 1"
               class="flex items-center gap-1 rounded-full bg-white px-2 py-0.5 ring-1 ring-slate-200"
@@ -158,13 +173,6 @@ async function createRootTask(): Promise<void> {
             Ressourcen
           </button>
           <button
-            type="button"
-            class="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
-            @click="showHealth = !showHealth"
-          >
-            {{ showHealth ? 'Check ausblenden' : 'Check anzeigen' }}
-          </button>
-          <button
             v-if="store.canWrite"
             type="button"
             class="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-60"
@@ -190,7 +198,11 @@ async function createRootTask(): Promise<void> {
         </button>
       </div>
 
-      <HealthPanel v-if="showHealth" class="mb-4" />
+      <HealthPanel
+        v-if="showHealth"
+        @close="showHealth = false"
+        @open-resources="onHealthResourceIssue"
+      />
 
       <GanttChart v-if="view === 'gantt'" :key="store.projectId ?? 0" />
       <TaskTree v-else />

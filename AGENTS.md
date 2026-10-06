@@ -202,6 +202,10 @@ Unteraufgaben-UX (2026-10-06, Branch `feature/subtask-ux`):
 - **Teilaufgabe aus dem Gantt-Baum**: „+"-Button je Aufgabenzeile, Inline-Eingabe erscheint direkt unter der Zeile (Overlay im virtualisierten linken Baum); Enter legt an, Esc bricht ab.
 - **Drag & Drop in der Liste**: Aufgabenzeile auf eine andere ziehen hängt sie unter diese (Ebenenwechsel); eine gestrichelte Drop-Zone (erscheint während des Drags) verschiebt auf die oberste Ebene. Zyklus-/Selbst-Drop wird clientseitig abgelehnt (Server prüft zusätzlich), `moveTask` sendet `If-Match` und klappt den neuen Elternteil auf.
 
+Planungs-Check als Modal (2026-10-06, Branch `feature/health-modal`):
+- Der Planungs-Check ist standardmäßig **verborgen**; der Header-Badge „N Check-Hinweise" (bzw. „Planung vollständig") öffnet ihn als **Modal** (Teleport-Overlay; ✕, Escape und Klick außerhalb schließen). Der frühere Toolbar-Toggle („Check anzeigen/ausblenden") entfällt.
+- Klick auf einen Hinweis schließt das Modal und **springt zur Aufgabe**: `store.focusTask(taskId)` klappt alle Vorfahren auf, wählt die Aufgabe aus und setzt `focusRequest` (Nonce). Die Liste scrollt per `data-task-id` zur Zeile, das Gantt zentriert Zeile (vertikal) und Balken (horizontal). Ressourcen-Hinweise öffnen stattdessen die Ressourcenverwaltung.
+
 ## 11. Nächste Schritte
 
 1. **Outlook gegen echten M365-Tenant**: Azure-App registrieren (Redirect `GRAPH_REDIRECT_URI`, delegated `Calendars.ReadWrite`, `offline_access`, `User.Read`), Verbindung testen; danach Inbound (Delta-Query) und Webhooks ergänzen.
@@ -242,6 +246,7 @@ Unteraufgaben-UX (2026-10-06, Branch `feature/subtask-ux`):
 | 2026-10-06 | Auto-Save statt Speichern-Button (Flush bei Tab-/Aufgabenwechsel) | Weniger Klicks, keine verlorenen Eingaben |
 | 2026-10-06 | Fixe Gantt-Achse ab Projektanker, ≥ 5 Jahre, wächst nur | Stabile Timeline, weit vorausplanbar |
 | 2026-10-06 | Unteraufgaben: sichtbarer „+"-Button, Anlage aus Drawer/Gantt, Drag&Drop-Umhängen | Kein Hover-Rätsel und kein API-Umweg zum Ebenenwechsel |
+| 2026-10-06 | Planungs-Check als Badge-getriggertes Modal; Hinweis-Klick springt zur Aufgabe | Weniger Layout-Verlust, direkter Weg zur betroffenen Aufgabe |
 
 ## 13. Bekannte Stolperfallen
 
@@ -274,3 +279,4 @@ Unteraufgaben-UX (2026-10-06, Branch `feature/subtask-ux`):
 - **Login-Rate-Limit für E2E/Prod-Builds:** Default 20/15 min im Prod-Modus – für Serienläufe `LOGIN_RATE_LIMIT=1000` (und `REFRESH_RATE_LIMIT=2000`) beim Compose-`up` setzen; die Variablen sind in `.env.example` dokumentiert.
 - **Web-Healthcheck:** prüft HTTPS mit `--no-check-certificate` (`https://127.0.0.1/healthz`); die frühere HTTP-Prüfung scheiterte am 308-Redirect von Caddy.
 - **Unteraufgaben-Drag&Drop:** HTML5-DnD über `draggable`; Drop auf sich selbst/Nachfahren wird clientseitig abgelehnt (Server prüft zusätzlich, `POST /tasks/:id/move` mit `parentId` + optional `sortOrder`). In E2E-Tests vor `dragTo` den Drawer schließen (überlagert am Desktop die unteren Zeilen). Gantt-„+"-Inline-Eingabe ist ein Overlay über der Folgezeile im virtualisierten linken Baum.
+- **Sprung zu Aufgaben aus dem Planungs-Check:** läuft über `store.focusTask` + `focusRequest` (Nonce); neue Ansichten, die auf Hinweise reagieren sollen, müssen `store.focusRequest` beobachten und selbst scrollen. `focusTask` klappt Vorfahren auf; ohne aufgeklappte Eltern existiert keine Zeile zum Anspringen.
